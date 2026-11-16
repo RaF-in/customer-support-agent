@@ -1,0 +1,14 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: customer-support-agent-qdrant
+    ports:
+      # Host port is overridable via QDRANT_PORT in .env (see .env.example);
+      # the container always listens on 6333.
+      - "${QDRANT_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:
