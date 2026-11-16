@@ -291,7 +291,7 @@ _Uses inline stub provider classes defined in the scratch commands (call-countin
 
 ## Task T6: Synchronous Ingestion Pipeline + Document Lifecycle
 
-> **Status:** not started
+> **Status:** done — implemented and verified 2026-11-16, 7/7 checklist items via scratch script against Docker Qdrant under a unique throwaway tenant (purged after; script deleted, never committed): happy path pending→processing→ready in order with 8 chunk points and ready-record-after-chunks confirmed by timestamps; embedding failure → `failed` mentioning the embedding service with zero chunk points; duplicate flagged `duplicate_of`; replace-by-name purged v1 record + chunks with only v2 content retrievable; delete removed record + chunks (second delete a clean no-op); password-protected → `failed` with the T4 reason, no chunks; exactly one outcome log line per document with stage metadata. Real-provider happy path deferred: `.env` OPENAI_API_KEY is a placeholder (401) — deterministic 1536-dim stub used; re-run when a valid key lands (same gap as T3's deferred smoke). Developer-approved exception applied: `vector.py` gained `delete_by_ids` (see Must NOT modify). `uv run pytest` exits 5 (no tests collected — expected until T7); `compileall` clean.
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical
@@ -339,7 +339,7 @@ _Scratch script against Docker Qdrant; failure injection via a stub provider tha
 **Modified files:** none.
 
 **Must NOT modify:**
-- T1–T5 files.
+- T1–T5 files — with one developer-approved exception (2026-11-16): `src/app/domain/base/vector.py` gains a `delete_by_ids`/`_delete_by_ids` method pair (~15 lines, existing public/private pattern). Reason: document records carry no `document_id` payload field (their own id *is* the document id), so T2's `delete_by_filter` cannot target a single record — and T6's replace-by-name/delete checklists require exactly that. Pure addition; T2's verification surface is unaffected.
 
 ---
 

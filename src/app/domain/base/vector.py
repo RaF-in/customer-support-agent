@@ -138,6 +138,19 @@ class VectorBaseDocument(BaseModel, Generic[T], ABC):
             logger.exception("Qdrant delete_by_filter failed for %s", cls.__name__)
             return False
 
+    @classmethod
+    def delete_by_ids(cls, ids: list[UUID]) -> bool:
+        """Delete points by id. Records carry no ``document_id`` payload
+        (their own id *is* the document id), so single-point deletes —
+        replace-by-name and delete in the pipeline — go by id.
+        Returns False on failure."""
+        try:
+            cls._delete_by_ids(ids)
+            return True
+        except Exception:
+            logger.exception("Qdrant delete_by_ids failed for %s", cls.__name__)
+            return False
+
     # ------------------------------------------------------------------
     # Private implementations — raise on failure
     # ------------------------------------------------------------------
@@ -221,4 +234,11 @@ class VectorBaseDocument(BaseModel, Generic[T], ABC):
         get_connection().client.delete(
             collection_name=cls._get_collection_name(),
             points_selector=models.FilterSelector(filter=models.Filter(must=must)),
+        )
+
+    @classmethod
+    def _delete_by_ids(cls, ids: list[UUID]) -> None:
+        get_connection().client.delete(
+            collection_name=cls._get_collection_name(),
+            points_selector=models.PointIdsList(points=[str(i) for i in ids]),
         )
