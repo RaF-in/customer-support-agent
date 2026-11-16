@@ -66,7 +66,7 @@ Bootstraps the empty repo into a runnable uv-managed Python 3.12+ project with t
 
 ## Task T2: Qdrant Infrastructure, OVM Base, Domain Entities
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical
