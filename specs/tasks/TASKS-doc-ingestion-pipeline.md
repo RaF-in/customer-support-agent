@@ -127,7 +127,7 @@ _Run-once scratch commands (`uv run python -c` or a throwaway script, documented
 
 ## Task T3: EmbeddingProvider Protocol, OpenAI Implementation, Factory
 
-> **Status:** not started
+> **Status:** in progress — implemented 2026-11-16, 4/5 checklist items verified (batching stub-verified); "Real embed smoke" deferred: no valid OPENAI_API_KEY in `.env` (developer decision 2026-11-16). Run it before review when a key is added.
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** high
