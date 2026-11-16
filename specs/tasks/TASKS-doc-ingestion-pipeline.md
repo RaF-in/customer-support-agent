@@ -179,7 +179,7 @@ The pluggable embedding layer: a `Protocol` (`embed(texts) -> list[list[float]]`
 
 ## Task T4: Upload Validation + Per-Format Cleaning Handlers
 
-> **Status:** not started
+> **Status:** in progress — implemented 2026-11-16, 6/7 checklist items verified (scanned-PDF OCR text recovery verified against a stubbed Tesseract call after routing was proven live); real OCR deferred: Tesseract binary not installed (developer decision 2026-11-16). Re-run the live OCR item before review after installing Tesseract.
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high
