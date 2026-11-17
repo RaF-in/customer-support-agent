@@ -139,7 +139,7 @@ _A deterministic 1536-dim stub embedding provider injected at the existing embed
 
 ## Task T3: Workflow Registry + Runtime Facade (run surface)
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** critical
