@@ -307,7 +307,7 @@ _A scratch stdio MCP server exposing two tools (e.g. `get_order_status`, `get_cu
 
 ## Task T6: Action-Execution Graph + Policies + Mock Handlers
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical
