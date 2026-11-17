@@ -95,3 +95,31 @@ New domain records (both payload-only Qdrant points, tenant-scoped like
 `domain/action_results.py` — `ActionResultRecord` (collection
 `action_results`; immutable execution audit). Both collections are created
 at app bootstrap.
+
+## Approvals & checkpointing (graphs T7)
+
+The approval workflow is the system's only *stateful* graph: a run gated by
+an approval policy pauses at an `interrupt()` (checkpointed under
+`thread_id = request_id`) and resumes when a decision is recorded —
+durable across processes via the checkpointer (`CHECKPOINT_BACKEND`).
+
+**Deploy rule — drain pending approvals before changing the approval
+graph.** LangGraph checkpoints are node-topology-sensitive: a pending
+approval's checkpoint references the exact node structure that paused it.
+Before deploying structural changes to `graphs/approval/` (renaming,
+adding, or removing nodes), decide or otherwise drain every pending
+approval — an old checkpoint resumed against a new topology fails.
+
+Operational constraints:
+
+- The sqlite checkpointer (`CHECKPOINT_BACKEND=sqlite`, the default) is
+  **single-writer** — fine for a single-process deployment; run multiple
+  workers only with the postgres backend (`docker compose --profile
+  postgres up -d`, `CHECKPOINT_BACKEND=postgres`).
+- Decision locking is process-local (per-`request_id` asyncio lock in
+  `graphs/runtime.py`); the same-moment double-decision guarantee holds
+  within one worker. Multi-worker needs the postgres path plus a
+  DB-level guard.
+- `checkpoints.sqlite` is local runtime state (gitignored); deleting it
+  abandons any paused approvals — their `ApprovalRecord`s stay `pending`
+  in the queue forever (no expiry mechanism yet).

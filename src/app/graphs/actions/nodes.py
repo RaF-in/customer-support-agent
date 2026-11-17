@@ -146,9 +146,18 @@ async def approval_gate_node(state: ActionExecutionState) -> dict[str, Any]:
     Required → this node writes the pending-approval terminal state itself:
     a fresh ``request_id`` plus the full request payload (action, input,
     reason, risk level, approver role) that T7's approval graph persists as
-    an ``ApprovalRecord``. Nothing is persisted in T6 — record persistence
-    and cross-graph chaining are T7's declared slice.
+    an ``ApprovalRecord``.
+
+    T7 chaining: when the runtime re-invokes this graph on an *approved*
+    request (``approval_id`` set), a recorded human decision has already
+    satisfied the policy — the gate does not re-evaluate and the run
+    proceeds to execute (re-validation happened in ``validate`` above).
+    This is the one sanctioned T6-file edit of the T7 slice (developer
+    decision, 2026-11-17): the ``approval_id`` channel this check reads was
+    declared here in T6 for exactly this purpose.
     """
+    if state.get("approval_id") is not None:
+        return {"policy_outcome": PolicyOutcome(required=False)}
     outcome = evaluate_approval_policy(state["action_name"], state["validated_inputs"])
     if not outcome.required:
         return {"policy_outcome": outcome}

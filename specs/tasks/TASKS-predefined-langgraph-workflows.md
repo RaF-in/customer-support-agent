@@ -360,7 +360,7 @@ _No LLM in this graph — mock handlers with a pre-seeded in-memory store; scrat
 
 ## Task T7: Approval Graph + Runtime Chaining (resume / decide)
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical
