@@ -14,7 +14,7 @@ from typing import AsyncIterator
 
 from fastapi import FastAPI
 
-from app.api import documents, search
+from app.api import approvals, documents, search
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +112,7 @@ def create_app() -> FastAPI:
         ),
         lifespan=lifespan,
     )
+    application.include_router(approvals.router)
     application.include_router(documents.router)
     application.include_router(search.router)
     return application

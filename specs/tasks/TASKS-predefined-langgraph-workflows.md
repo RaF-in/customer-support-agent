@@ -415,7 +415,7 @@ _Sqlite checkpointer; two processes where noted; mock handlers as in T6:_
 
 ## Task T8: Approvals HTTP API
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** high
