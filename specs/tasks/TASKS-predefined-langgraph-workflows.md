@@ -193,7 +193,7 @@ _A scratch one-node toy workflow registered via `register()` in the verification
 
 ## Task T4: Self-RAG Knowledge Graph
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** high
