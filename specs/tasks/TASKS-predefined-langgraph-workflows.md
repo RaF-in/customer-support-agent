@@ -253,7 +253,7 @@ _Fake chat models injected via the T1 seam script every decision; the determinis
 
 ## Task T5: Live-Data Graph + MCP Infrastructure
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** medium
