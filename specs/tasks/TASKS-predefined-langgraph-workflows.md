@@ -87,7 +87,7 @@ Everything the four graphs install against, and nothing graph-shaped: the depend
 
 ## Task T2: Retrieval Service Extraction (contract-preserving)
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** high
