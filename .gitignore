@@ -1,0 +1,38 @@
+# --- Secrets / environment -----------------------------------------------
+# Real config with OPENAI_API_KEY — never commit. .env.example stays tracked.
+.env
+.env.*
+!.env.example
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# --- Virtual environments (uv creates .venv; uv.lock IS committed) --------
+.venv/
+venv/
+
+# --- Test / tooling caches -------------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Verification scratch files --------------------------------------------
+# The dev-pipeline checklist verifications use throwaway scripts/logs that
+# are documented in the task session and never committed.
+scratch_*
+*.log
+
+# --- IDEs / editors ---------------------------------------------------------
+.idea/
+.vscode/
+
+# --- OS junk ----------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
