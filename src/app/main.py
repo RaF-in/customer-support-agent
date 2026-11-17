@@ -43,6 +43,8 @@ def _bootstrap_collections() -> None:
     constraint).
     """
     # Imported here so importing this module stays free of side effects.
+    from app.domain.action_results import ActionResultRecord
+    from app.domain.approvals import ApprovalRecord
     from app.domain.chunks import EmbeddedDocxChunk, EmbeddedPdfChunk, EmbeddedTextChunk
     from app.domain.documents import (
         CleanedDocxDocument,
@@ -55,7 +57,15 @@ def _bootstrap_collections() -> None:
 
     payload_only: list[tuple[str, int]] = [
         (entity.collection_name, 1)  # dummy 1-dim vector (use_vector_index=False)
-        for entity in (DocumentRecord, CleanedPdfDocument, CleanedTextDocument, CleanedDocxDocument)
+        for entity in (
+            DocumentRecord,
+            CleanedPdfDocument,
+            CleanedTextDocument,
+            CleanedDocxDocument,
+            ApprovalRecord,  # approvals queue (graphs T1) — never-inserted
+            ActionResultRecord,  # action audit (graphs T1) — would read as
+            # an outage if a search ever hit it before the first insert
+        )
     ]
     chunk_collections: list[tuple[str, int]] = []
     try:

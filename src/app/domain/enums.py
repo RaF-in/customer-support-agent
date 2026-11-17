@@ -20,3 +20,24 @@ class DataCategory(StrEnum):
     PDF = "pdfs"
     TEXT = "texts"
     DOCX = "docxs"
+
+
+class ApprovalStatus(StrEnum):
+    """Lifecycle of an approval request.
+
+    Only ``pending -> approved | rejected`` is a valid transition, and the
+    runtime enforces it (T7) — not the record model. ``expired`` is
+    reserved for a future expiry mechanism (ARCH Open Question).
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
+class ActionStatus(StrEnum):
+    """Outcome of one action execution — written once, immutable."""
+
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"

@@ -1,3 +1,5 @@
+from typing import Any
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -24,3 +26,28 @@ class Settings(BaseSettings):
     CHUNK_SIZE: int = Field(default=500, gt=0)
     CHUNK_OVERLAP: int = Field(default=50, ge=0)
     EMBEDDING_BATCH_SIZE: int = Field(default=100, gt=0)
+
+    # LLM / chat models (graphs subsystem — purpose-keyed factory)
+    LLM_PROVIDER: str = "openai"
+    CHAT_MODEL: str = "gpt-4o-mini"
+
+    # Self-RAG bounds (A12 — every loop is settings-driven, never hardcoded;
+    # defaults reproduce the ARCH latency budget: 2 calls on the direct path,
+    # ≤ ~25 = 1 decide + 3 attempts × 8 grading/generation calls)
+    SELF_RAG_MAX_REWRITES: int = Field(default=2, ge=0)  # 0 disables the loop
+    SELF_RAG_MAX_REVISIONS: int = Field(default=2, ge=0)  # 0 disables the loop
+    SELF_RAG_TOP_K: int = Field(default=4, ge=1)
+    LIVE_DATA_MAX_STEPS: int = Field(default=8, ge=1)  # agent ↔ ToolNode rounds
+
+    # MCP tool servers (JSON, langchain-mcp-adapters client format) and the
+    # per-tenant tool allowlist (JSON: tenant -> [tool names]). Deny-by-
+    # default: a tenant absent from the allowlist gets NO tools.
+    MCP_SERVERS: dict[str, Any] = Field(default_factory=dict)
+    MCP_TENANT_ALLOWLIST: dict[str, list[str]] = Field(default_factory=dict)
+
+    # LangGraph checkpointer (approval-graph persistence, A7): sqlite needs
+    # no extra infra (single-writer dev limit); postgres runs behind
+    # `docker compose --profile postgres up -d` for the multi-worker path.
+    CHECKPOINT_BACKEND: str = "sqlite"
+    SQLITE_CHECKPOINT_PATH: str = "checkpoints.sqlite"
+    POSTGRES_DSN: str = "postgresql://app:app@localhost:5432/app"

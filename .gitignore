@@ -22,6 +22,11 @@ venv/
 .coverage
 htmlcov/
 
+# --- LangGraph sqlite checkpointer ------------------------------------------
+# Local runtime state (SQLITE_CHECKPOINT_PATH, default checkpoints.sqlite)
+# — deletable, never committed.
+*.sqlite
+
 # --- Verification scratch files --------------------------------------------
 # The dev-pipeline checklist verifications use throwaway scripts/logs that
 # are documented in the task session and never committed.
