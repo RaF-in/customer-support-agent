@@ -386,7 +386,7 @@ indistinguishable `None`).
 
 ## Task T7: End-to-end run-once verification — the full matrix
 
-> **Status:** not started
+> **Status:** in progress — keyless subset verified 2026-11-19 (7A roundtrip/race/shutdown, 7C un-awaited gate/zero-diff/cold-boot/server-shutdown); embedding-dependent items (7A order probe, all of 7B, Qdrant-down frozen strings, staged embedding failure) await a real `OPENAI_API_KEY`. Found + fixed en route: inclusive-scroll paging duplication (see fix commit, T2-owned).
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical

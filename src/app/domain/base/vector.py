@@ -241,10 +241,14 @@ class VectorBaseDocument(BaseModel, Generic[T], ABC):
         return True
 
     @classmethod
-    async def _bulk_find(
+    async def _scroll_page(
         cls, tenant_id: str, limit: int, offset: Optional[str]
-    ) -> list[T]:
-        records, _ = await get_connection().client.scroll(
+    ) -> tuple[list[T], object]:
+        """One scroll page plus the server's continuation offset. Qdrant's
+        ``offset`` is *inclusive* (a hand-rolled ``last-id`` offset re-emits
+        the boundary record), so paging MUST continue from the server's
+        ``next_page_offset`` — found live by the T7 gate on Qdrant 1.20."""
+        records, next_offset = await get_connection().client.scroll(
             collection_name=cls._get_collection_name(),
             scroll_filter=models.Filter(must=[cls._tenant_condition(tenant_id)]),
             limit=limit,
@@ -252,22 +256,31 @@ class VectorBaseDocument(BaseModel, Generic[T], ABC):
             with_payload=True,
             with_vectors=cls.use_vector_index,
         )
-        return [cls.from_record(record) for record in records]
+        return [cls.from_record(record) for record in records], next_offset
+
+    @classmethod
+    async def _bulk_find(
+        cls, tenant_id: str, limit: int, offset: Optional[str]
+    ) -> list[T]:
+        records, _ = await cls._scroll_page(tenant_id, limit, offset)
+        return records
 
     @classmethod
     async def _bulk_find_all(cls, tenant_id: str) -> list[T]:
         """Full-tenant scroll via the private (raising) page fetch, so a
-        failure on any page raises to the public twin's swallow-and-log."""
+        failure on any page raises to the public twin's swallow-and-log.
+        Continues from the server-returned offset each page (no boundary
+        duplication)."""
         documents: list[T] = []
         offset: Optional[str] = None
         while True:
-            page = await cls._bulk_find(
-                tenant_id, limit=SCROLL_PAGE_SIZE, offset=offset
+            page, next_offset = await cls._scroll_page(
+                tenant_id, SCROLL_PAGE_SIZE, offset
             )
             documents.extend(page)
-            if len(page) < SCROLL_PAGE_SIZE:
+            if next_offset is None or len(page) < SCROLL_PAGE_SIZE:
                 return documents
-            offset = str(page[-1].id)
+            offset = next_offset
 
     @classmethod
     async def _search(
