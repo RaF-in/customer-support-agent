@@ -51,6 +51,8 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `CHUNK_SIZE` | `500` | Chunker target size (characters) |
 | `CHUNK_OVERLAP` | `50` | Adjacent-chunk overlap (characters) |
 | `EMBEDDING_BATCH_SIZE` | `100` | Texts per embedding API call |
+| `QDRANT_MAX_CONCURRENCY` | `8` | Max parallel Qdrant requests per gathered operation |
+| `EMBEDDING_MAX_CONCURRENCY` | `4` | Max concurrent OpenAI embedding requests |
 | `LLM_PROVIDER` | `openai` | Chat-model provider for the graphs subsystem |
 | `CHAT_MODEL` | `gpt-4o-mini` | Chat model name (purpose-keyed temperatures are fixed in the factory) |
 | `SELF_RAG_MAX_REWRITES` | `2` | Self-RAG question-rewrite loop bound (0 disables) |

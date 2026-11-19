@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = Field(default=50, ge=0)
     EMBEDDING_BATCH_SIZE: int = Field(default=100, gt=0)
 
+    # Concurrency caps for remote I/O (async data layer): per-call asyncio
+    # semaphores are sized from these — max gathered Qdrant requests per
+    # operation, and max concurrent OpenAI embedding requests.
+    QDRANT_MAX_CONCURRENCY: int = Field(default=8, ge=1)
+    EMBEDDING_MAX_CONCURRENCY: int = Field(default=4, ge=1)
+
     # LLM / chat models (graphs subsystem — purpose-keyed factory)
     LLM_PROVIDER: str = "openai"
     CHAT_MODEL: str = "gpt-4o-mini"
