@@ -78,7 +78,7 @@ is expected and covered by T7, not here.
 
 ## Task T2: OVM goes async — VectorBaseDocument + bulk_find_all + retrieve_by_ids
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical
