@@ -208,7 +208,7 @@ class EmbeddingDispatcher:
     }
 
     @classmethod
-    def dispatch(
+    async def dispatch(
         cls, *, data_model: CleanedDocument, chunks: list[Chunk]
     ) -> list[EmbeddedChunk]:
         factory = cls._factories.get(type(data_model))
@@ -223,4 +223,4 @@ class EmbeddingDispatcher:
             type(data_model).__name__,
             type(handler).__name__,
         )
-        return handler.embed(data_model=data_model, chunks=chunks)
+        return await handler.embed(data_model=data_model, chunks=chunks)

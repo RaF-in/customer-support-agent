@@ -1,9 +1,10 @@
 """OpenAI ``text-embedding-3-small`` — the MVP EmbeddingProvider (A5)."""
 
+import asyncio
 import logging
 from typing import Optional
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from app.infrastructure.embedding.base import Embedding, EmbeddingProvider
 from app.infrastructure.settings import Settings
@@ -12,7 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):
-    """Batched embeddings via the OpenAI API.
+    """Batched embeddings via the OpenAI API, independent batches gathered
+    under a per-call semaphore (``EMBEDDING_MAX_CONCURRENCY``).
 
     The OpenAI client is built eagerly in ``__init__`` from typed settings,
     so a missing ``OPENAI_API_KEY`` surfaces as a clear pydantic-settings
@@ -21,7 +23,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings = settings or Settings()
-        self._client = OpenAI(api_key=self._settings.OPENAI_API_KEY)
+        self._client = AsyncOpenAI(api_key=self._settings.OPENAI_API_KEY)
 
     @property
     def model_id(self) -> str:
@@ -39,20 +41,28 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         # chunking handlers (T5) to split oversized chunks.
         return 8191
 
-    def embed(self, texts: list[str]) -> list[Embedding]:
-        """Embed texts in ``EMBEDDING_BATCH_SIZE`` batches. Raises on API
-        failure — the pipeline (T6) catches and marks the document failed."""
+    async def embed(self, texts: list[str]) -> list[Embedding]:
+        """Embed texts in ``EMBEDDING_BATCH_SIZE`` batches, gathered under a
+        per-call semaphore. Vectors return positionally ordered — gather
+        yields results in argument order, never completion order. Raises on
+        API failure — the pipeline catches and marks the document failed."""
         if not texts:
             return []
         batch_size = self._settings.EMBEDDING_BATCH_SIZE
-        total_batches = (len(texts) + batch_size - 1) // batch_size
-        vectors: list[Embedding] = []
-        for number, start in enumerate(range(0, len(texts), batch_size), start=1):
-            batch = texts[start : start + batch_size]
-            response = self._client.embeddings.create(
-                model=self.model_id, input=batch
-            )
-            vectors.extend(item.embedding for item in response.data)
+        batches = [
+            texts[start : start + batch_size]
+            for start in range(0, len(texts), batch_size)
+        ]
+        total_batches = len(batches)
+        # Per-call semaphore from a fresh Settings() read (AD4) — the cap may
+        # change between embed calls; no shared mutable state.
+        semaphore = asyncio.Semaphore(Settings().EMBEDDING_MAX_CONCURRENCY)
+
+        async def _embed_batch(number: int, batch: list[str]) -> list[Embedding]:
+            async with semaphore:
+                response = await self._client.embeddings.create(
+                    model=self.model_id, input=batch
+                )
             logger.info(
                 "Embedding batch %d/%d: %d texts -> %d dims (model=%s)",
                 number,
@@ -61,4 +71,14 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                 self.dim,
                 self.model_id,
             )
-        return vectors
+            return [item.embedding for item in response.data]
+
+        # results[i] is batch i's vectors (gather preserves argument order);
+        # the ordered flatten keeps the output aligned with ``texts``.
+        batch_vectors = await asyncio.gather(
+            *(
+                _embed_batch(number, batch)
+                for number, batch in enumerate(batches, start=1)
+            )
+        )
+        return [vector for vectors in batch_vectors for vector in vectors]

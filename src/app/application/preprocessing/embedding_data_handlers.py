@@ -39,11 +39,13 @@ class EmbeddingDataHandler(ABC):
     def __init__(self, embedding_provider: Optional[EmbeddingProvider] = None) -> None:
         self._provider = embedding_provider or get_embedding_model()
 
-    def embed(
+    async def embed(
         self, *, data_model: CleanedDocument, chunks: list[Chunk]
     ) -> list[EmbeddedChunk]:
         """Embed ``chunks`` in ``EMBEDDING_BATCH_SIZE`` batches, producing
-        ``Embedded*Chunk`` entities with the model id in metadata."""
+        ``Embedded*Chunk`` entities with the model id in metadata. Batches
+        are awaited sequentially; the provider gathers its own API calls
+        under ``EMBEDDING_MAX_CONCURRENCY``."""
         if not chunks:
             raise ValueError(
                 f"Document {data_model.document_id} has no chunks to embed."
@@ -53,7 +55,9 @@ class EmbeddingDataHandler(ABC):
         embedded: list[EmbeddedChunk] = []
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start : start + batch_size]
-            vectors = self._provider.embed([chunk.content for chunk in batch])
+            vectors = await self._provider.embed(
+                [chunk.content for chunk in batch]
+            )
             if len(vectors) != len(batch):
                 raise ValueError(
                     "Embedding provider returned %d vectors for %d texts"

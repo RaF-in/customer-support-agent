@@ -138,7 +138,7 @@ task — expected, fixed by T4–T6.
 
 ## Task T3: Embedding goes async — AsyncOpenAI provider + async dispatch
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** high

@@ -15,8 +15,10 @@ Embedding = list[float]
 class EmbeddingProvider(Protocol):
     """Turns a batch of texts into fixed-size vectors."""
 
-    def embed(self, texts: list[str]) -> list[Embedding]:
-        """Embed ``texts``; returns exactly one vector per input, in order."""
+    async def embed(self, texts: list[str]) -> list[Embedding]:
+        """Embed ``texts``; returns exactly one vector per input, in order.
+        Awaitable — providers gather independent batches internally, but the
+        positional input→output order is part of this contract."""
         ...
 
     @property
