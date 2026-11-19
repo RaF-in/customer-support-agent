@@ -325,7 +325,7 @@ models, status codes, and error strings are **byte-frozen** (AR3).
 
 ## Task T6: Graphs — drop to_thread bridges, route runtime through the OVM
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** s
 > **Priority:** high

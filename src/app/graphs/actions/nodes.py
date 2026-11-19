@@ -29,7 +29,6 @@ Failure classes (R9):
   — the runtime facade is the only catcher.
 """
 
-import asyncio
 import logging
 import uuid
 from typing import Any, Optional
@@ -239,7 +238,7 @@ async def record_result_node(state: ActionExecutionState) -> dict[str, Any]:
         result=result_payload,
         error=reason,
     )
-    persisted = await asyncio.to_thread(ActionResultRecord.bulk_insert, [record])
+    persisted = await ActionResultRecord.bulk_insert([record])
     if not persisted:
         raise RuntimeError(
             "action result could not be persisted (vector db unavailable)"

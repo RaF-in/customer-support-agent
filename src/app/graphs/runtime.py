@@ -54,7 +54,6 @@ from app.graphs.approval.state import ApprovalGraphInput
 from app.graphs.base.state import WorkflowResult, WorkflowState, WorkflowStatus
 from app.graphs.registry import get_workflow
 from app.infrastructure.checkpoint import get_checkpointer
-from app.infrastructure.qdrant import get_connection
 from app.infrastructure.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -255,24 +254,13 @@ async def _fetch_approval(
 
     Returns ``None`` when the id is unknown OR belongs to another tenant —
     deliberately indistinguishable (R3: no tenant-existence oracle; the
-    cross-tenant probe reads exactly like the unknown-id one). Qdrant
-    failures raise — infrastructure class, mapped to ``failed`` by the
-    caller.
+    cross-tenant probe reads exactly like the unknown-id one; the OVM
+    compares the tenant after the fetch). Routed through the OVM's raising
+    ``_retrieve_by_ids`` twin: Qdrant failures raise — infrastructure
+    class, mapped to ``failed`` by the caller.
     """
-    def _retrieve() -> Optional[ApprovalRecord]:
-        points = get_connection().client.retrieve(
-            collection_name=ApprovalRecord.collection_name,
-            ids=[request_id],
-            with_payload=True,
-        )
-        if not points:
-            return None
-        return ApprovalRecord.from_record(points[0])
-
-    record = await asyncio.to_thread(_retrieve)
-    if record is None or record.tenant_id != tenant_id:
-        return None
-    return record
+    records = await ApprovalRecord._retrieve_by_ids(tenant_id, [request_id])
+    return records[0] if records else None
 
 
 async def _pause_for_approval(

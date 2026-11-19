@@ -22,7 +22,6 @@ Deploy rule (README): LangGraph checkpoints are node-topology-sensitive —
 drain or expire pending approvals before structural changes to this graph.
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Optional
@@ -61,7 +60,7 @@ async def create_request_node(state: ApprovalState) -> dict[str, Any]:
         status=ApprovalStatus.PENDING,
         thread_id=state["request_id"],
     )
-    persisted = await asyncio.to_thread(ApprovalRecord.bulk_insert, [record])
+    persisted = await ApprovalRecord.bulk_insert([record])
     if not persisted:
         raise RuntimeError(
             "approval request could not be persisted (vector db unavailable)"
@@ -156,7 +155,7 @@ async def record_decision_node(state: ApprovalState) -> dict[str, Any]:
         thread_id=state["request_id"],
         created_at=datetime.fromisoformat(created) if created else utc_now(),
     )
-    persisted = await asyncio.to_thread(ApprovalRecord.bulk_insert, [record])
+    persisted = await ApprovalRecord.bulk_insert([record])
     if not persisted:
         raise RuntimeError(
             "approval decision could not be persisted (vector db unavailable)"

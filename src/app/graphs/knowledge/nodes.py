@@ -16,7 +16,6 @@ Settings are read per call, never captured at import or compile time, so
 environment overrides take effect on the next run (nothing hardcoded).
 """
 
-import asyncio
 import logging
 from typing import Any
 
@@ -46,13 +45,13 @@ async def decide_retrieval_node(state: SelfRagState) -> dict[str, Any]:
 async def retrieve_node(state: SelfRagState) -> dict[str, Any]:
     """Retrieve this tenant's best passages for the current question.
 
-    The tenant comes from the envelope only; the sync retrieval service
-    (A9) runs in a worker thread. An empty list is valid — it feeds the
-    no-answer path; infrastructure errors raise (→ runtime → ``failed``).
+    The tenant comes from the envelope only; the retrieval service (A9) is
+    awaited directly. An empty list is valid — it feeds the no-answer
+    path; infrastructure errors raise (→ runtime → ``failed``).
     """
     top_k = Settings().SELF_RAG_TOP_K
-    passages = await asyncio.to_thread(
-        retrieve_passages, state["tenant_id"], state["question"], top_k
+    passages = await retrieve_passages(
+        state["tenant_id"], state["question"], top_k
     )
     return {"context": passages}
 
