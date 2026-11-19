@@ -42,14 +42,14 @@ class SearchHit(BaseModel):
 
 
 @router.post("/search", response_model=list[SearchHit])
-def search(
+async def search(
     search_request: SearchRequest, tenant_id: str = Path(min_length=1)
 ) -> list[SearchHit]:
     """Embed the query and return this tenant's best passages from live
     ``ready`` documents (R1/R4/R5). Metadata carries ``unreliable_table``
     for flagged table chunks (R9)."""
     try:
-        hits = retrieve_passages(
+        hits = await retrieve_passages(
             tenant_id=tenant_id,
             query=search_request.query,
             top_k=search_request.top_k,

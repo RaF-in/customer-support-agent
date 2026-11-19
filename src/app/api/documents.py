@@ -37,9 +37,6 @@ router = APIRouter(prefix="/tenants/{tenant_id}", tags=["documents"])
 # runs on the received bytes.
 _MULTIPART_OVERHEAD_SLACK = 64 * 1024
 
-# Record scroll page size for tenant-wide listings.
-_PAGE_SIZE = 100
-
 _SUPPORTED_SUFFIXES = ".pdf / .txt / .docx"
 
 
@@ -79,30 +76,24 @@ class DocumentDetail(BaseModel):
     updated_at: datetime
 
 
-def tenant_records(tenant_id: str) -> list[DocumentRecord]:
-    """Scroll every record of one tenant, paging via point-id offset.
+async def tenant_records(tenant_id: str) -> list[DocumentRecord]:
+    """Every record of one tenant — one full scroll via the OVM.
 
     Raises HTTPException 500 when Qdrant is unavailable (infrastructure
     outage — the one case ARCH allows a 500 for).
     """
-    records: list[DocumentRecord] = []
-    offset: Optional[str] = None
-    while True:
-        page = DocumentRecord.bulk_find(tenant_id, limit=_PAGE_SIZE, offset=offset)
-        if page is None:
-            raise HTTPException(
-                status_code=500, detail="vector db unavailable: could not list documents"
-            )
-        records.extend(page)
-        if len(page) < _PAGE_SIZE:
-            return records
-        offset = str(page[-1].id)
+    records = await DocumentRecord.bulk_find_all(tenant_id)
+    if records is None:
+        raise HTTPException(
+            status_code=500, detail="vector db unavailable: could not list documents"
+        )
+    return records
 
 
-def _find_record(tenant_id: str, document_id: UUID) -> DocumentRecord:
+async def _find_record(tenant_id: str, document_id: UUID) -> DocumentRecord:
     """Fetch one record scoped to its tenant. A wrong tenant and a wrong
     document id are indistinguishable — no tenant-existence oracle (R5)."""
-    for record in tenant_records(tenant_id):
+    for record in await tenant_records(tenant_id):
         if record.id == document_id:
             return record
     raise HTTPException(status_code=404, detail="document not found")
@@ -122,7 +113,8 @@ def _content_length(request: Request) -> Optional[int]:
 async def upload_document(
     request: Request, tenant_id: str = Path(min_length=1)
 ) -> UploadResponse:
-    """Accept a multipart upload and run the full pipeline synchronously.
+    """Accept a multipart upload and run the full pipeline to its terminal
+    state within this call.
 
     Responds 200 with the *terminal* record — ``ready`` or ``failed`` with
     a reason (A1/N2). 413/422 are raised before any record is created.
@@ -177,7 +169,7 @@ async def upload_document(
     # pipeline runs on in-memory bytes only.
     content_hash = hashlib.sha256(content).hexdigest()
     record = DocumentRecord(tenant_id=tenant_id, filename=filename, content_hash=content_hash)
-    if not DocumentRecord.bulk_insert([record]):
+    if not await DocumentRecord.bulk_insert([record]):
         raise HTTPException(
             status_code=500,
             detail="vector db unavailable: could not create the document record",
@@ -191,7 +183,7 @@ async def upload_document(
     )
 
     try:
-        terminal = IngestionPipeline().process(record=record, content=content)
+        terminal = await IngestionPipeline().process(record=record, content=content)
     except Exception:
         # process() raises only when even `failed` could not be persisted —
         # an infrastructure outage (the one legitimate 500).
@@ -214,9 +206,9 @@ async def upload_document(
 
 
 @router.get("/documents", response_model=list[DocumentSummary])
-def list_documents(tenant_id: str = Path(min_length=1)) -> list[DocumentSummary]:
+async def list_documents(tenant_id: str = Path(min_length=1)) -> list[DocumentSummary]:
     """List this tenant's documents — statuses, flags, reasons (R3/R8)."""
-    records = tenant_records(tenant_id)
+    records = await tenant_records(tenant_id)
     records.sort(key=lambda r: (r.created_at, str(r.id)), reverse=True)
     return [
         DocumentSummary(
@@ -232,11 +224,11 @@ def list_documents(tenant_id: str = Path(min_length=1)) -> list[DocumentSummary]
 
 
 @router.get("/documents/{document_id}", response_model=DocumentDetail)
-def get_document(
+async def get_document(
     tenant_id: str = Path(min_length=1), document_id: UUID = Path()
 ) -> DocumentDetail:
     """Fetch one document's full record (R3)."""
-    record = _find_record(tenant_id, document_id)
+    record = await _find_record(tenant_id, document_id)
     return DocumentDetail(
         document_id=record.id,
         tenant_id=record.tenant_id,
@@ -252,10 +244,10 @@ def get_document(
 
 
 @router.delete("/documents/{document_id}", status_code=204)
-def delete_document(
+async def delete_document(
     tenant_id: str = Path(min_length=1), document_id: UUID = Path()
 ) -> Response:
     """Delete a document immediately: record + chunks (R7). Idempotent —
     an unknown (or already deleted) id is still a 204."""
-    IngestionPipeline().delete_document(tenant_id=tenant_id, document_id=document_id)
+    await IngestionPipeline().delete_document(tenant_id=tenant_id, document_id=document_id)
     return Response(status_code=204)

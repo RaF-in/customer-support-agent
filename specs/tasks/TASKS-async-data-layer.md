@@ -263,7 +263,7 @@ A8 ready-record-last, `wait=True`, and N2 one-call-terminal survive verbatim.
 
 ## Task T5: HTTP surface + app — async handlers, frozen contracts, lifespan close
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high

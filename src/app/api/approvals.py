@@ -39,10 +39,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tenants/{tenant_id}", tags=["approvals"])
 
-# Record scroll page size for tenant-wide listings (documents precedent) —
-# also the documented approvals-listing pagination default.
-_PAGE_SIZE = 50
-
 
 class ApprovalSummary(BaseModel):
     """Queue item — what a human needs to decide, plus audit once decided."""
@@ -86,29 +82,22 @@ class DecisionResponse(BaseModel):
     record_id: Optional[str] = None
 
 
-def _tenant_approvals(tenant_id: str) -> list[ApprovalRecord]:
-    """Scroll every approval record of one tenant, paging via point-id
-    offset.
+async def _tenant_approvals(tenant_id: str) -> list[ApprovalRecord]:
+    """Every approval record of one tenant — one full scroll via the OVM.
 
     Raises HTTPException 500 when Qdrant is unavailable (infrastructure
     outage — the one case ARCH allows a 500 for).
     """
-    records: list[ApprovalRecord] = []
-    offset: Optional[str] = None
-    while True:
-        page = ApprovalRecord.bulk_find(tenant_id, limit=_PAGE_SIZE, offset=offset)
-        if page is None:
-            raise HTTPException(
-                status_code=500, detail="vector db unavailable: could not list approvals"
-            )
-        records.extend(page)
-        if len(page) < _PAGE_SIZE:
-            return records
-        offset = str(page[-1].id)
+    records = await ApprovalRecord.bulk_find_all(tenant_id)
+    if records is None:
+        raise HTTPException(
+            status_code=500, detail="vector db unavailable: could not list approvals"
+        )
+    return records
 
 
 @router.get("/approvals", response_model=list[ApprovalSummary])
-def list_approvals(
+async def list_approvals(
     tenant_id: str = Path(min_length=1), status: Optional[ApprovalStatus] = None
 ) -> list[ApprovalSummary]:
     """List this tenant's approval requests — the decision queue (R11).
@@ -116,7 +105,7 @@ def list_approvals(
     ``?status=pending`` narrows the view to what awaits a human; unfiltered,
     decided requests are included with their audit fields.
     """
-    records = _tenant_approvals(tenant_id)
+    records = await _tenant_approvals(tenant_id)
     records.sort(key=lambda r: (r.created_at, str(r.id)), reverse=True)
     if status is not None:
         records = [record for record in records if record.status == status]

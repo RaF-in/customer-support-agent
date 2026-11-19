@@ -8,6 +8,7 @@ connections are lazy and a failed bootstrap only logs a warning, so the
 app starts even with Qdrant or the embedding provider down.
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -30,7 +31,7 @@ def _configure_logging() -> None:
     )
 
 
-def _bootstrap_collections() -> None:
+async def _bootstrap_collections() -> None:
     """Ensure every declared collection exists with its expected vector
     size and a ``tenant_id`` index (ARCH: indexes created at bootstrap).
 
@@ -41,6 +42,10 @@ def _bootstrap_collections() -> None:
     the 1-dim dummy vector size; chunk collections bind to the embedding
     provider's dim (switching provider = drop + recreate, documented
     constraint).
+
+    Creates run in parallel under a semaphore (AD3/AD4); creation itself
+    is race-safe (AD10), so concurrent first-insert auto-creates and
+    multi-worker bootstraps converge on the same end state.
     """
     # Imported here so importing this module stays free of side effects.
     from app.domain.action_results import ActionResultRecord
@@ -54,6 +59,7 @@ def _bootstrap_collections() -> None:
     from app.domain.records import DocumentRecord
     from app.infrastructure.embedding.factory import get_embedding_model
     from app.infrastructure.qdrant import create_collection_if_missing
+    from app.infrastructure.settings import Settings
 
     payload_only: list[tuple[str, int]] = [
         (entity.collection_name, 1)  # dummy 1-dim vector (use_vector_index=False)
@@ -82,8 +88,20 @@ def _bootstrap_collections() -> None:
             exc_info=True,
         )
     try:
-        for collection_name, vector_size in payload_only + chunk_collections:
-            create_collection_if_missing(collection_name, vector_size=vector_size)
+        semaphore = asyncio.Semaphore(Settings().QDRANT_MAX_CONCURRENCY)
+
+        async def _create_one(collection_name: str, vector_size: int) -> None:
+            async with semaphore:
+                await create_collection_if_missing(
+                    collection_name, vector_size=vector_size
+                )
+
+        await asyncio.gather(
+            *(
+                _create_one(collection_name, vector_size)
+                for collection_name, vector_size in payload_only + chunk_collections
+            )
+        )
     except Exception:
         logger.warning(
             "Collection bootstrap failed (is Qdrant up?); collections will be "
@@ -95,8 +113,16 @@ def _bootstrap_collections() -> None:
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    _bootstrap_collections()
-    yield
+    await _bootstrap_collections()
+    try:
+        yield
+    finally:
+        # uvicorn drains in-flight requests before lifespan shutdown, so
+        # closing the Qdrant transport here cannot cut a live request
+        # short (AD11). Imported late, like every other infra import here.
+        from app.infrastructure.qdrant import aclose_connection
+
+        await aclose_connection()
 
 
 def create_app() -> FastAPI:
