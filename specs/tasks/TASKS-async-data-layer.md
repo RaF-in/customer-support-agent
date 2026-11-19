@@ -200,7 +200,7 @@ check at the handler stays (AD5). Cleaning and chunking dispatch remain sync.
 
 ## Task T4: Services — async retrieval with gathers + async pipeline with off-loop CPU stages
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high

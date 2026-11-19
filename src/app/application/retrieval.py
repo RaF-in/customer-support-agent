@@ -3,14 +3,15 @@ the HTTP search route and the Self-RAG ``retrieve`` node (T4).
 
 Extracted contract-preserving from ``api/search.py``: ready-record join,
 query embedding, three-format search, orphan/mid-pipeline filtering, top-k.
-HTTP-agnostic by design (plain function, no FastAPI imports) so graph nodes
-can call it via ``asyncio.to_thread``; infrastructure failures raise the
+HTTP-agnostic by design (plain async function, no FastAPI imports) so the
+route and graph nodes await it directly; infrastructure failures raise the
 exceptions below and the API layer maps them to the durable v1 error
 strings.
 """
 
+import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from app.domain.chunks import EmbeddedDocxChunk, EmbeddedPdfChunk, EmbeddedTextChunk
 from app.domain.enums import DocumentStatus
@@ -22,11 +23,6 @@ logger = logging.getLogger(__name__)
 # All chunk collections are searched and the best passages win — a tenant's
 # documents may span formats.
 _CHUNK_CLASSES = (EmbeddedPdfChunk, EmbeddedTextChunk, EmbeddedDocxChunk)
-
-# Record scroll page size for tenant-wide listings (mirrors the paging in
-# ``api/documents.tenant_records``, which keeps its own copy for its own
-# callers).
-_PAGE_SIZE = 100
 
 
 class RetrievalServiceError(Exception):
@@ -46,24 +42,20 @@ class VectorSearchError(RetrievalServiceError):
     """A chunk-collection similarity search failed (Qdrant down)."""
 
 
-def _tenant_records(tenant_id: str) -> list[DocumentRecord]:
-    """Scroll every record of one tenant, paging via point-id offset.
-
-    Raises RecordListingError when Qdrant is unavailable.
-    """
-    records: list[DocumentRecord] = []
-    offset: Optional[str] = None
-    while True:
-        page = DocumentRecord.bulk_find(tenant_id, limit=_PAGE_SIZE, offset=offset)
-        if page is None:
-            raise RecordListingError("vector db unavailable: could not list documents")
-        records.extend(page)
-        if len(page) < _PAGE_SIZE:
-            return records
-        offset = str(page[-1].id)
+async def _embed_query(tenant_id: str, query: str) -> list[float]:
+    """Embed the query text, mapping any provider failure to the durable
+    v1 error (``embedding service unavailable``)."""
+    try:
+        vectors = await get_embedding_model().embed([query])
+        return vectors[0]
+    except Exception:
+        logger.exception("Query embedding failed for tenant %s", tenant_id)
+        raise QueryEmbeddingError("embedding service unavailable") from None
 
 
-def retrieve_passages(tenant_id: str, query: str, top_k: int) -> list[dict[str, Any]]:
+async def retrieve_passages(
+    tenant_id: str, query: str, top_k: int
+) -> list[dict[str, Any]]:
     """Embed ``query`` and return this tenant's best passages from live
     ``ready`` documents (R1/R4/R5) — ``{content, document_id, score,
     metadata}`` dicts, score-sorted descending, truncated to ``top_k``.
@@ -73,25 +65,33 @@ def retrieve_passages(tenant_id: str, query: str, top_k: int) -> list[dict[str, 
     their ``document_id`` currently exists for this tenant. That also keeps
     orphan chunks invisible when a delete/replace purge partially failed
     (A7) and hides chunks of a document still mid-pipeline (A8).
+
+    The record scroll and the query embedding are independent and run
+    concurrently; the three chunk-class searches likewise.
     """
+    records, query_vector = await asyncio.gather(
+        DocumentRecord.bulk_find_all(tenant_id),
+        _embed_query(tenant_id, query),
+    )
+    if records is None:
+        raise RecordListingError("vector db unavailable: could not list documents")
     ready_ids = {
         str(record.id)
-        for record in _tenant_records(tenant_id)
+        for record in records
         if record.status == DocumentStatus.READY
     }
     if not ready_ids:
-        # No live document can match — skip the embedding call entirely.
+        # No live document can match — skip the chunk searches entirely.
         return []
 
-    try:
-        query_vector = get_embedding_model().embed([query])[0]
-    except Exception:
-        logger.exception("Query embedding failed for tenant %s", tenant_id)
-        raise QueryEmbeddingError("embedding service unavailable") from None
-
+    pages = await asyncio.gather(
+        *(
+            chunk_class.search(query_vector, tenant_id=tenant_id, limit=top_k)
+            for chunk_class in _CHUNK_CLASSES
+        )
+    )
     hits: list[dict[str, Any]] = []
-    for chunk_class in _CHUNK_CLASSES:
-        points = chunk_class.search(query_vector, tenant_id=tenant_id, limit=top_k)
+    for points in pages:
         if points is None:
             raise VectorSearchError("vector db unavailable: search failed")
         for point in points:

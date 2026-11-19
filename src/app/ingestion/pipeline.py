@@ -1,4 +1,4 @@
-"""Synchronous ingestion pipeline — the orchestrator (A1).
+"""Asynchronous ingestion pipeline — the orchestrator (A1).
 
 One call runs VALIDATE → EXTRACT/CLEAN → CHUNK → EMBED → LOAD to a terminal
 state, driving the ``DocumentRecord`` lifecycle (``pending -> processing ->
@@ -9,15 +9,21 @@ transactions). Chunks are inserted only after every stage succeeded and the
 ``ready`` record is written last (A8), so non-ready content never exists in
 searchable collections.
 
+CPU-bound stages (pymupdf parsing, tesseract OCR, text splitting) run off
+the event loop in worker threads (AD8); independent writes run in
+parallel — but the A7/A8 ordering below is order against lifecycle
+milestones, never just completion.
+
 The initial ``pending`` record is created by the caller (the API layer,
 T7); ``process`` receives it already persisted.
 """
 
+import asyncio
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import Optional
 from uuid import UUID
 
 from app.application.preprocessing.dispatchers import (
@@ -74,9 +80,6 @@ _ALLOWED_TRANSITIONS: dict[DocumentStatus, set[DocumentStatus]] = {
     DocumentStatus.FAILED: set(),
 }
 
-# Record scroll page size for tenant-wide scans (duplicates, replace).
-_RECORD_PAGE_SIZE = 100
-
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -88,10 +91,12 @@ def category_from_filename(filename: str) -> Optional[DataCategory]:
 
 
 class IngestionPipeline:
-    """Synchronous document ingestion — one call per upload, terminal on
+    """Asynchronous document ingestion — one call per upload, terminal on
     return (N2)."""
 
-    def process(self, *, record: DocumentRecord, content: bytes) -> DocumentRecord:
+    async def process(
+        self, *, record: DocumentRecord, content: bytes
+    ) -> DocumentRecord:
         """Run the full pipeline for one uploaded document.
 
         ``record`` must already be persisted as ``pending`` by the caller.
@@ -101,12 +106,12 @@ class IngestionPipeline:
         non-terminal state that could have been recorded.
         """
         try:
-            return self._process(record=record, content=content)
+            return await self._process(record=record, content=content)
         except Exception as error:
             # Safety net (N2): anything unexpected still terminates.
             logger.exception("Unexpected error processing document %s", record.id)
             try:
-                return self._fail(record, f"internal error: {error}")
+                return await self._fail(record, f"internal error: {error}")
             except Exception:
                 logger.error(
                     "Could not persist failed status for document %s "
@@ -115,13 +120,13 @@ class IngestionPipeline:
                 )
                 raise
 
-    def delete_document(self, *, tenant_id: str, document_id: UUID) -> bool:
+    async def delete_document(self, *, tenant_id: str, document_id: UUID) -> bool:
         """Delete a document: record point + chunk/cleaned points (R7).
         Idempotent — an unknown id is a logged no-op. Returns True when a
         record was found and deleted."""
-        for record in self._tenant_records(tenant_id):
+        for record in await self._tenant_records(tenant_id):
             if record.id == document_id:
-                self._delete_document_points(record)
+                await self._delete_document_points(record)
                 return True
         logger.info(
             "Delete: no record %s for tenant %s (no-op)", document_id, tenant_id
@@ -132,78 +137,104 @@ class IngestionPipeline:
     # Stage orchestration
     # ------------------------------------------------------------------
 
-    def _process(self, *, record: DocumentRecord, content: bytes) -> DocumentRecord:
-        record = self._transition(record, DocumentStatus.PROCESSING)
+    async def _process(
+        self, *, record: DocumentRecord, content: bytes
+    ) -> DocumentRecord:
+        record = await self._transition(record, DocumentStatus.PROCESSING)
 
-        # Pre-stage lifecycle (R6/A11), before any expensive work.
-        self._purge_replaced(record)
-        record = self._flag_duplicate(record)
+        # Pre-stage lifecycle (R6/A11), before any expensive work. ONE shared
+        # tenant scroll feeds both the replace-purge and the duplicate flag
+        # (AD6); the purge runs first so same-name + same-bytes counts as a
+        # replace, not a duplicate of a record that is about to be gone.
+        existing = await self._tenant_records(record.tenant_id)
+        await self._purge_replaced(record, existing)
+        record = self._flag_duplicate(record, existing)
 
         category = category_from_filename(record.filename)
         if category is None:
-            return self._fail(record, f"unsupported format: {record.filename}")
+            return await self._fail(record, f"unsupported format: {record.filename}")
 
         # 1. VALIDATE (R10/N3)
         reason = validate_document(content, category)
         if reason is not None:
-            return self._fail(record, reason)
+            return await self._fail(record, reason)
 
-        # 2. EXTRACT/CLEAN (R2/R9)
+        # 2. EXTRACT/CLEAN (R2/R9) — CPU/subprocess-bound (pymupdf,
+        #    tesseract): run off the event loop (AD8).
         try:
-            cleaned = CleaningDispatcher.dispatch(
+            cleaned = await asyncio.to_thread(
+                CleaningDispatcher.dispatch,
                 content=content,
                 category=category,
                 document_id=record.id,
                 tenant_id=record.tenant_id,
             )
         except Exception as error:
-            return self._fail(record, f"extraction failed: {error}")
+            return await self._fail(record, f"extraction failed: {error}")
 
-        # 3. CHUNK
+        # 3. CHUNK — CPU-bound text splitting: off the event loop (AD8).
         try:
-            chunks = ChunkingDispatcher.dispatch(data_model=cleaned)
+            chunks = await asyncio.to_thread(
+                ChunkingDispatcher.dispatch, data_model=cleaned
+            )
         except Exception as error:
-            return self._fail(record, f"chunking failed: {error}", platform=cleaned.platform)
+            return await self._fail(record, f"chunking failed: {error}", platform=cleaned.platform)
 
-        # 4. EMBED (ARCH stress-test: provider down -> failed, no chunks)
+        # 4. EMBED (ARCH stress-test: provider down -> failed, no chunks) —
+        #    awaited directly; the provider parallelizes its own batches.
         try:
-            embedded = EmbeddingDispatcher.dispatch(data_model=cleaned, chunks=chunks)
+            embedded = await EmbeddingDispatcher.dispatch(
+                data_model=cleaned, chunks=chunks
+            )
         except Exception as error:
-            return self._fail(
+            return await self._fail(
                 record, f"embedding service unavailable: {error}", platform=cleaned.platform
             )
 
         # 5. LOAD (A8: ready only after everything is stored)
-        return self._load(record, cleaned, embedded)
+        return await self._load(record, cleaned, embedded)
 
-    def _load(
+    async def _load(
         self,
         record: DocumentRecord,
         cleaned: CleanedDocument,
         embedded: list[EmbeddedChunk],
     ) -> DocumentRecord:
-        """Persist the cleaned doc and the chunks (grouped by class), then
-        the ``ready`` record LAST (A8). Any insert failure purges what this
-        document already wrote and fails — partial chunks never survive."""
+        """Persist the cleaned doc and the chunks (grouped by class, with
+        the groups inserted in parallel), then the ``ready`` record LAST
+        (A8). Any insert failure purges what this document already wrote
+        and fails — partial chunks never survive."""
         grouped: dict[type[EmbeddedChunk], list[EmbeddedChunk]] = defaultdict(list)
         for chunk in embedded:
             grouped[type(chunk)].append(chunk)
 
-        written: list[type[VectorBaseDocument]] = []
-        for chunk_class, chunk_batch in grouped.items():
-            if not chunk_class.bulk_insert(chunk_batch):
-                self._abort_load(record, written)
-                return self._fail(
-                    record, "vector db unavailable: chunk insert failed", platform=cleaned.platform
-                )
-            written.append(chunk_class)
-
-        if not type(cleaned).bulk_insert([cleaned]):
-            self._abort_load(record, written)
-            return self._fail(
-                record, "vector db unavailable: cleaned document insert failed", platform=cleaned.platform
+        # Chunk groups first, the cleaned document last — matching the
+        # pre-async write order so the failure reason stays attributable.
+        insert_classes: list[type[VectorBaseDocument]] = [
+            *grouped.keys(),
+            type(cleaned),
+        ]
+        insert_batches: list[list[VectorBaseDocument]] = [*grouped.values(), [cleaned]]
+        results = await asyncio.gather(
+            *(
+                insert_class.bulk_insert(batch)
+                for insert_class, batch in zip(insert_classes, insert_batches)
             )
-        written.append(type(cleaned))
+        )
+        if not all(results):
+            written = [
+                point_class
+                for point_class, inserted in zip(insert_classes, results)
+                if inserted
+            ]
+            await self._abort_load(record, written)
+            chunk_inserts_ok = all(results[: len(grouped)])
+            reason = (
+                "vector db unavailable: cleaned document insert failed"
+                if chunk_inserts_ok
+                else "vector db unavailable: chunk insert failed"
+            )
+            return await self._fail(record, reason, platform=cleaned.platform)
 
         flags = dict(record.flags)
         if cleaned.metadata.get("has_unreliable_tables"):
@@ -211,18 +242,18 @@ class IngestionPipeline:
         if cleaned.metadata.get("ocr_used"):
             flags["ocr_used"] = True
 
-        record = self._transition(
+        record = await self._transition(
             record, DocumentStatus.READY, num_chunks=len(embedded), flags=flags
         )
         self._log_outcome(record, platform=cleaned.platform, chunk_metadata=embedded[0].metadata)
         return record
 
-    def _abort_load(
+    async def _abort_load(
         self, record: DocumentRecord, written: list[type[VectorBaseDocument]]
     ) -> None:
         """Best-effort purge of partially inserted points (A8)."""
         for point_class in written:
-            if not point_class.delete_by_filter(record.tenant_id, record.id):
+            if not await point_class.delete_by_filter(record.tenant_id, record.id):
                 logger.error(
                     "Orphan %s points may remain for document %s",
                     point_class.__name__,
@@ -233,12 +264,14 @@ class IngestionPipeline:
     # Lifecycle operations
     # ------------------------------------------------------------------
 
-    def _purge_replaced(self, record: DocumentRecord) -> None:
+    async def _purge_replaced(
+        self, record: DocumentRecord, existing: list[DocumentRecord]
+    ) -> None:
         """Same filename in this tenant is replaced (R6): old record point
         first, then its chunk/cleaned points (A7 ordering). Runs before the
         duplicate scan so same-name + same-bytes counts as a replace, not a
         duplicate of a record that is about to be gone."""
-        for other in self._tenant_records(record.tenant_id):
+        for other in existing:
             if other.id == record.id or other.filename != record.filename:
                 continue
             logger.info(
@@ -247,14 +280,16 @@ class IngestionPipeline:
                 other.filename,
                 record.tenant_id,
             )
-            self._delete_document_points(other)
+            await self._delete_document_points(other)
 
-    def _flag_duplicate(self, record: DocumentRecord) -> DocumentRecord:
+    def _flag_duplicate(
+        self, record: DocumentRecord, existing: list[DocumentRecord]
+    ) -> DocumentRecord:
         """Flag exact-duplicate content (same SHA-256 hash) among this
         tenant's other surviving records (R8/A11). Duplicates are stored and
         processed normally — only the flag differs."""
         duplicate_of: Optional[UUID] = None
-        for other in self._tenant_records(record.tenant_id):
+        for other in existing:
             if other.id != record.id and other.content_hash == record.content_hash:
                 duplicate_of = other.id
                 break
@@ -265,11 +300,13 @@ class IngestionPipeline:
         logger.info("Document %s duplicates %s", record.id, duplicate_of)
         return record.model_copy(update={"flags": flags, "updated_at": _now()})
 
-    def _delete_document_points(self, record: DocumentRecord) -> None:
-        """A7 ordering: the record point goes first (the document stops
-        existing for every reader), then the chunk/cleaned purges. A failed
-        purge leaves orphan points invisible to retrieval — logged, accepted."""
-        if not DocumentRecord.delete_by_ids([record.id]):
+    async def _delete_document_points(self, record: DocumentRecord) -> None:
+        """A7 ordering: the record point goes first, awaited on its own (the
+        document stops existing for every reader), and only then do the
+        chunk/cleaned purges run — those two in parallel, since A7 is order
+        against the record delete, not among the purges. A failed purge
+        leaves orphan points invisible to retrieval — logged, accepted."""
+        if not await DocumentRecord.delete_by_ids([record.id]):
             logger.error(
                 "Failed to delete record %s; keeping its points consistent", record.id
             )
@@ -277,34 +314,37 @@ class IngestionPipeline:
         category = category_from_filename(record.filename)
         if category is None:
             return
-        for point_class in (
+        point_classes = (
             _CHUNK_CLASS_BY_CATEGORY[category],
             _CLEANED_CLASS_BY_CATEGORY[category],
-        ):
-            if not point_class.delete_by_filter(record.tenant_id, record.id):
+        )
+        results = await asyncio.gather(
+            *(
+                point_class.delete_by_filter(record.tenant_id, record.id)
+                for point_class in point_classes
+            )
+        )
+        for point_class, deleted in zip(point_classes, results):
+            if not deleted:
                 logger.error(
                     "Orphan %s points may remain for document %s",
                     point_class.__name__,
                     record.id,
                 )
 
-    def _tenant_records(self, tenant_id: str) -> Iterator[DocumentRecord]:
-        """Scroll every record of one tenant, paging via point-id offset."""
-        offset: Optional[str] = None
-        while True:
-            page = DocumentRecord.bulk_find(tenant_id, limit=_RECORD_PAGE_SIZE, offset=offset)
-            if page is None:
-                raise RuntimeError("vector db unavailable: could not list records")
-            yield from page
-            if len(page) < _RECORD_PAGE_SIZE:
-                return
-            offset = str(page[-1].id)
+    async def _tenant_records(self, tenant_id: str) -> list[DocumentRecord]:
+        """Every record of one tenant — one shared full scroll via the OVM
+        (AD6), replacing the paged loop this class used to own."""
+        records = await DocumentRecord.bulk_find_all(tenant_id)
+        if records is None:
+            raise RuntimeError("vector db unavailable: could not list records")
+        return records
 
     # ------------------------------------------------------------------
     # Status transitions and the per-document outcome line
     # ------------------------------------------------------------------
 
-    def _transition(
+    async def _transition(
         self, record: DocumentRecord, status: DocumentStatus, **fields: object
     ) -> DocumentRecord:
         """Move the record to ``status`` (one-way only) and upsert it. A
@@ -313,17 +353,19 @@ class IngestionPipeline:
         if status not in _ALLOWED_TRANSITIONS[record.status]:
             raise ValueError(f"Illegal status transition {record.status} -> {status}")
         updated = record.model_copy(update={"status": status, "updated_at": _now(), **fields})
-        if not DocumentRecord.bulk_insert([updated]):
+        if not await DocumentRecord.bulk_insert([updated]):
             raise RuntimeError(f"vector db unavailable: could not persist status {status}")
         logger.info(
             "Document %s status: %s -> %s", record.id, record.status.value, status.value
         )
         return updated
 
-    def _fail(
+    async def _fail(
         self, record: DocumentRecord, reason: str, platform: Optional[str] = None
     ) -> DocumentRecord:
-        record = self._transition(record, DocumentStatus.FAILED, failure_reason=reason)
+        record = await self._transition(
+            record, DocumentStatus.FAILED, failure_reason=reason
+        )
         self._log_outcome(record, platform=platform)
         return record
 
