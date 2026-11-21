@@ -11,6 +11,10 @@ orchestrator would make it routable to itself — and conversely any new
 workflow becomes routable with zero orchestrator change (CR-R5/PE-R1).
 Nothing imports this package from ``app.graphs``: the conversation service
 (``application/conversations.py``) compiles the graph via
-``build_orchestrator_graph()`` (exported from T4 on) and invokes it
-directly — never through ``run_workflow``.
+``build_orchestrator_graph()`` and invokes it directly — never through
+``run_workflow``.
 """
+
+from app.graphs.orchestrator.graph import build_orchestrator_graph
+
+__all__ = ["build_orchestrator_graph"]

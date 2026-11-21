@@ -188,7 +188,7 @@ _Fake chat models injected via the T1 seam; direct node/function invocation from
 
 ## Task T4: Slice-1 reply paths + composition + topology
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical
