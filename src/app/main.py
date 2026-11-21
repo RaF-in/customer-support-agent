@@ -114,6 +114,13 @@ async def _bootstrap_collections() -> None:
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     await _bootstrap_collections()
+    # Conversational transcripts (Postgres pool + idempotent schema
+    # bootstrap), degrade-gracefully like the Qdrant bootstrap: unreachable
+    # at boot logs one warning and only the conversational surfaces are
+    # down (A18). Imported late, like every other infra import here.
+    from app.infrastructure.postgres import close_postgres, open_postgres
+
+    await open_postgres()
     try:
         yield
     finally:
@@ -123,6 +130,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         from app.infrastructure.qdrant import aclose_connection
 
         await aclose_connection()
+        await close_postgres()
 
 
 def create_app() -> FastAPI:

@@ -72,7 +72,7 @@ Everything conversational that is neither Postgres-shaped nor graph-shaped: the 
 
 ## Task T2: Postgres wiring + conversational domain records
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical
