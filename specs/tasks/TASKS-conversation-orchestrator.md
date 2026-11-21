@@ -464,7 +464,7 @@ _Direct tool invocation against a fresh TodoList, no LLM:_
 
 ## Task T9: Executor + verify + slice-2 topology
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical

@@ -1,4 +1,4 @@
-"""Reply composition (CR-R9/R10/R11, A6).
+"""Reply composition (CR-R9/R10/R11 + PE-R11, A6).
 
 The shared terminal of the slice-1 reply paths. Direct and clarify replies
 are already final — they pass through untouched. A workflow result is
@@ -8,6 +8,13 @@ naming what failed, so the conversation can continue (CR-R11); a pending
 approval becomes a deterministic template naming the request id — no LLM
 call, testable by inspection (CR-R10, A6). Ultimate fallbacks are static
 strings: degradation never terminates a turn without a reply (CR-N1).
+
+``compose_final`` (slice 2) is the planner–executor path's terminal: one
+``generator`` call over *all* step outputs — the last step's output is
+never returned verbatim alone (PE-R11, enforced mechanically by the
+verbatim guard) — and, on executor takeover, an honest partial report
+listing what completed, what failed or was skipped, and what remained open
+(PE-R8) instead of claiming success.
 """
 
 import json
@@ -16,7 +23,9 @@ from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.domain.enums import TurnOutcome
 from app.graphs.base.state import WorkflowResult, WorkflowStatus
+from app.graphs.orchestrator.executor import TodoList, output_text
 from app.graphs.orchestrator.state import OrchestratorState
 from app.infrastructure.llm.factory import get_chat_model
 
@@ -137,3 +146,103 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
 
 # Node name used by the topology (T9 adds compose_final beside this).
 compose = compose_reply
+
+
+# ---------------------------------------------------------------------------
+# compose_final (T9's declared slice) — PE-R8/PE-R11
+# ---------------------------------------------------------------------------
+
+_FINAL_SYSTEM = (
+    "You compose the single final customer-facing answer for a multi-step "
+    "plan. Use every step's outcome to answer the customer's original "
+    "request, concisely and in their language. Synthesize across steps — "
+    "never dump raw JSON and never return one step's raw output as the "
+    "whole answer."
+)
+_TAKEOVER_SYSTEM = (
+    "You write honest partial-completion reports for a customer-support "
+    "assistant: name what was completed, what failed or was skipped and "
+    "why, and what remained unfinished. Never claim success for unfinished "
+    "work. Keep it warm and brief."
+)
+_STATIC_FINAL_FALLBACK = (
+    "I completed the steps of your request; the details are recorded here "
+    "in our conversation."
+)
+_STATIC_TAKEOVER_FALLBACK = (
+    "I could not finish everything you asked — some steps remain "
+    "incomplete. The details are recorded here in our conversation."
+)
+
+
+def _step_lines(steps: list[dict[str, Any]]) -> str:
+    """One deterministic line per step — statuses and outputs, no prose
+    invention (what the generator synthesizes from)."""
+    lines: list[str] = []
+    for step in steps:
+        line = f"step {step['number']} ({step['workflow']}): {step['status']}"
+        if step.get("output") is not None:
+            line += f" — {output_text(step['output'])}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _deterministic_final(steps: list[dict[str, Any]]) -> str:
+    """The verbatim-guard fallback: a static report naming every step's
+    outcome (PE-R11 — better an honest listing than a raw dump)."""
+    return (
+        "Here is where your request stands:\n"
+        + "\n".join(
+            f"- step {s['number']} ({s['workflow']}): {s['status']}" for s in steps
+        )
+    )
+
+
+async def compose_final(state: OrchestratorState) -> dict[str, Any]:
+    """The slice-2 terminal: synthesize the final answer over all step
+    outputs (PE-R11), or the honest partial report on takeover (PE-R8)."""
+    plan = state.get("plan") or {}
+    steps: list[dict[str, Any]] = plan.get("steps") or []
+    takeover = bool(plan.get("takeover"))
+    history = state.get("history") or []
+    goal = plan.get("message") or state.get("message") or ""
+
+    if takeover:
+        todos = TodoList.model_validate({"items": plan.get("todos") or []})
+        user = (
+            f"The customer's request: {goal}\n"
+            f"Step outcomes:\n{_step_lines(steps)}\n\n"
+            f"Todos that remain OPEN (this work was NOT finished):\n"
+            f"{todos.render()}\n\n"
+            "Write the honest partial report."
+        )
+        reply = await _generate(
+            _TAKEOVER_SYSTEM, user, _STATIC_TAKEOVER_FALLBACK, history
+        )
+    else:
+        user = (
+            f"The customer's request: {goal}\n"
+            f"Step outcomes:\n{_step_lines(steps)}\n\n"
+            "Write the single final answer."
+        )
+        reply = await _generate(
+            _FINAL_SYSTEM, user, _STATIC_FINAL_FALLBACK, history
+        )
+
+    # PE-R11, enforced: the last produced output is never the reply
+    # verbatim alone — degenerate generations fall back to the honest
+    # deterministic listing.
+    last_output = next(
+        (s["output"] for s in reversed(steps) if s.get("output") is not None),
+        None,
+    )
+    if last_output is not None and steps:
+        verbatim_forms = {output_text(last_output).strip()}
+        try:
+            verbatim_forms.add(json.dumps(last_output, default=str).strip())
+        except TypeError:
+            pass
+        if reply.strip() in verbatim_forms:
+            reply = _deterministic_final(steps)
+
+    return {"reply": reply, "outcome": TurnOutcome.MULTI_WORKFLOW}
