@@ -412,7 +412,7 @@ _Fakes via the seam; direct invocation of the generation/validation functions:_
 
 ## Task T8: Todo tools
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high
