@@ -26,6 +26,7 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel, Field
 
+from app.application import conversations as conversation_service
 from app.domain.approvals import ApprovalRecord
 from app.domain.enums import ActionStatus, ApprovalStatus
 from app.graphs.base.state import WorkflowStatus
@@ -177,6 +178,21 @@ async def decide(
             ),
         ) from None
     output = result.output if isinstance(result.output, dict) else {}
+    # The CR-R10 conversational hand-off (A8): after a successful decision,
+    # append the outcome to the linked conversation's transcript. Failure-
+    # isolated by design — this can never change the decision response
+    # above; the approval + action records remain the durable truth.
+    try:
+        await conversation_service.on_approval_decided(
+            tenant_id=tenant_id, request_id=request_id, result=result
+        )
+    except Exception:
+        logger.error(
+            "approval outcome transcript append failed (tenant=%s request_id=%s)",
+            tenant_id,
+            request_id,
+            exc_info=True,
+        )
     return DecisionResponse(
         request_id=result.request_id or request_id,
         decision=decision_request.decision,

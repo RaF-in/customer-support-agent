@@ -302,7 +302,7 @@ _Scratch scripts against the promoted compose Postgres; fakes via the seam; the 
 
 ## Task T6: Conversations HTTP API + approvals decision hook
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical
