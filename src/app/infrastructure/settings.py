@@ -45,6 +45,19 @@ class Settings(BaseSettings):
     SELF_RAG_TOP_K: int = Field(default=4, ge=1)
     LIVE_DATA_MAX_STEPS: int = Field(default=8, ge=1)  # agent ↔ ToolNode rounds
 
+    # Conversational orchestrator bounds (conversation-orchestrator ARCH A13
+    # — same discipline: every cycle is settings-driven, never hardcoded).
+    # The history lever reads 0 = unlimited (full transcript to the router,
+    # A14); POSTGRES_POOL_MAX_SIZE is the concurrent-turns lever — each
+    # active turn holds one pool connection for its advisory lock.
+    CONVERSATION_MAX_MESSAGE_CHARS: int = Field(default=8000, gt=0)
+    CONVERSATION_HISTORY_MAX_MESSAGES: int = Field(default=0, ge=0)  # 0 = unlimited
+    CLARIFY_MAX_CONSECUTIVE: int = Field(default=2, ge=1)
+    PLANNER_MAX_ATTEMPTS: int = Field(default=3, ge=1)
+    EXECUTOR_MAX_REINVOCATIONS: int = Field(default=3, ge=0)
+    PLAN_MAX_STEPS: int = Field(default=8, ge=1)
+    POSTGRES_POOL_MAX_SIZE: int = Field(default=10, ge=1)
+
     # MCP tool servers (JSON, langchain-mcp-adapters client format) and the
     # per-tenant tool allowlist (JSON: tenant -> [tool names]). Deny-by-
     # default: a tenant absent from the allowlist gets NO tools.
@@ -52,8 +65,9 @@ class Settings(BaseSettings):
     MCP_TENANT_ALLOWLIST: dict[str, list[str]] = Field(default_factory=dict)
 
     # LangGraph checkpointer (approval-graph persistence, A7): sqlite needs
-    # no extra infra (single-writer dev limit); postgres runs behind
-    # `docker compose --profile postgres up -d` for the multi-worker path.
+    # no extra infra (single-writer dev limit); postgres is the default
+    # compose service (conversation transcripts) and doubles as the
+    # multi-worker checkpointer backend.
     CHECKPOINT_BACKEND: str = "sqlite"
     SQLITE_CHECKPOINT_PATH: str = "checkpoints.sqlite"
     POSTGRES_DSN: str = "postgresql://app:app@localhost:5432/app"

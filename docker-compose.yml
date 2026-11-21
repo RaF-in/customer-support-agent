@@ -10,13 +10,14 @@ services:
       - qdrant_data:/qdrant/storage
     restart: unless-stopped
 
-  # Optional LangGraph checkpointer backend (CHECKPOINT_BACKEND=postgres).
-  # Off by default — start it with: docker compose --profile postgres up -d
+  # Default boot dependency: conversation transcripts live in Postgres
+  # (conversational subsystem), and it doubles as the optional checkpointer
+  # backend (CHECKPOINT_BACKEND=postgres). Starts with plain
+  # `docker compose up -d` — no profile flag needed anymore.
   # Credentials must match POSTGRES_DSN in .env (default app:app@localhost:5432/app).
   postgres:
     image: postgres:17
     container_name: customer-support-agent-postgres
-    profiles: ["postgres"]
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     environment:

@@ -8,14 +8,15 @@ All persistence lives in a single Qdrant instance.
 ## Prerequisites
 
 - Python 3.12+ and [uv](https://docs.astral.sh/uv/)
-- Docker (for the local Qdrant instance)
+- Docker (for the local Qdrant + Postgres instances)
 - Tesseract OCR — required from task T4 onward (OCR of scanned PDFs); not needed to boot
 
 ## Quickstart
 
 ```bash
-# 1. Start the local Qdrant instance (data persists in the named volume
-#    `qdrant_data` across restarts)
+# 1. Start the local Qdrant + Postgres instances (data persists in the named
+#    volumes `qdrant_data` / `postgres_data` across restarts). Postgres is a
+#    default boot dependency — conversation transcripts live there.
 docker compose up -d
 curl http://localhost:6333        # sanity check: Qdrant answers with version JSON
 
@@ -59,11 +60,18 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `SELF_RAG_MAX_REVISIONS` | `2` | Self-RAG answer-revision loop bound (0 disables) |
 | `SELF_RAG_TOP_K` | `4` | Chunks fetched per retrieval |
 | `LIVE_DATA_MAX_STEPS` | `8` | Live-data agent ↔ ToolNode round bound |
+| `CONVERSATION_MAX_MESSAGE_CHARS` | `8000` | Max length of one conversational message (422 beyond) |
+| `CONVERSATION_HISTORY_MAX_MESSAGES` | `0` | History cap fed to the router — `0` = unlimited (full transcript) |
+| `CLARIFY_MAX_CONSECUTIVE` | `2` | Consecutive-clarify cap; at the cap the next turn must commit (no more clarify) |
+| `PLANNER_MAX_ATTEMPTS` | `3` | Plan generation+validation attempts before the apologetic direct answer |
+| `EXECUTOR_MAX_REINVOCATIONS` | `3` | Executor re-invocations on open todos before takeover with a partial report |
+| `PLAN_MAX_STEPS` | `8` | Max steps in one plan |
+| `POSTGRES_POOL_MAX_SIZE` | `10` | Postgres pool size — the concurrent-turns lever (one held connection per active turn) |
 | `MCP_SERVERS` | `{}` | MCP tool servers (JSON, langchain-mcp-adapters client format) |
 | `MCP_TENANT_ALLOWLIST` | `{}` | Per-tenant tool allowlist (JSON, tenant → [tools]); deny-by-default |
 | `CHECKPOINT_BACKEND` | `sqlite` | LangGraph checkpointer: `sqlite` or `postgres` (unknown fails fast) |
 | `SQLITE_CHECKPOINT_PATH` | `checkpoints.sqlite` | Sqlite checkpointer file (local runtime state, gitignored) |
-| `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres checkpointer DSN (run `docker compose --profile postgres up -d`) |
+| `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN — transcripts (and the postgres checkpointer); the compose service starts by default |
 
 **Port conflict on 6333?** Set `QDRANT_PORT` in `.env` (host port) and point
 `QDRANT_URL` at the new port — never edit `docker-compose.yml` directly.
@@ -116,8 +124,8 @@ Operational constraints:
 
 - The sqlite checkpointer (`CHECKPOINT_BACKEND=sqlite`, the default) is
   **single-writer** — fine for a single-process deployment; run multiple
-  workers only with the postgres backend (`docker compose --profile
-  postgres up -d`, `CHECKPOINT_BACKEND=postgres`).
+  workers only with the postgres backend (`CHECKPOINT_BACKEND=postgres`;
+  the compose postgres service starts by default).
 - Decision locking is process-local (per-`request_id` asyncio lock in
   `graphs/runtime.py`); the same-moment double-decision guarantee holds
   within one worker. Multi-worker needs the postgres path plus a
@@ -125,3 +133,30 @@ Operational constraints:
 - `checkpoints.sqlite` is local runtime state (gitignored); deleting it
   abandons any paused approvals — their `ApprovalRecord`s stay `pending`
   in the queue forever (no expiry mechanism yet).
+
+## Conversational subsystem (orchestrator — landing task by task)
+
+The conversational front door — each turn classified by a router into a
+direct answer, one clarifying question, a single workflow run, or a
+planner–executor plan, with every reply composed conversationally and the
+transcript stored in Postgres:
+
+```
+src/app/
+├── api/conversations.py            # POST start · POST message · GET transcript [conv T6]
+├── application/conversations.py    # turn service: advisory-locked turns, one-tx
+│                                   #   transcript persistence, approval hook  [conv T5]
+├── domain/conversations.py         # ConversationRecord + ConversationMessageRecord
+│                                   #   (Postgres row models)                  [conv T2]
+├── domain/plans.py                 # PlanRecord, PlanStep, Todo (same)        [conv T2]
+├── graphs/orchestrator/            # the conversational graph — deliberately
+│                                   #   NOT registered in WORKFLOW_REGISTRY    [conv T3+]
+└── infrastructure/postgres.py      # async pool + schema bootstrap            [conv T2]
+```
+
+**Postgres is a default boot dependency for this subsystem** —
+`docker compose up -d` starts it alongside Qdrant. The bootstrap is
+degrade-graceful: without Postgres at boot the app still starts and
+documents/search/approvals behave normally, while the conversational
+surfaces return 500 until it is healthy. `CHECKPOINT_BACKEND` (sqlite
+default) is independent of the transcript store.

@@ -41,3 +41,60 @@ class ActionStatus(StrEnum):
 
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class TurnOutcome(StrEnum):
+    """Router classification of one conversational turn (CR-R5, PE-R1).
+
+    ``multi_workflow`` routes the turn into the slice-2 planner–executor
+    path; the other three outcomes are served by the slice-1 reply paths.
+    """
+
+    DIRECT = "direct"
+    CLARIFY = "clarify"
+    WORKFLOW = "workflow"
+    MULTI_WORKFLOW = "multi_workflow"
+
+
+class MessageRole(StrEnum):
+    """Author of one transcript row — the user or the assistant."""
+
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class MessageKind(StrEnum):
+    """Content class of one transcript row (CR-R3, PE-R12).
+
+    User messages are always ``text``; workflow outcomes and validated
+    plans are transcript artifacts too — everything transcript-visible
+    lives in the one messages table.
+    """
+
+    TEXT = "text"
+    WORKFLOW_OUTCOME = "workflow_outcome"
+    PLAN = "plan"
+
+
+class PlanStatus(StrEnum):
+    """Lifecycle of one orchestrated plan's mutable working record.
+
+    ``validated -> executing -> (paused <-> executing) -> done``, terminal
+    via failure-exhaustion or executor takeover. Rejection of a step's
+    approval counts as that step failing (PE decision 8).
+    """
+
+    VALIDATED = "validated"
+    EXECUTING = "executing"
+    PAUSED = "paused"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class TodoStatus(StrEnum):
+    """Status of one executor todo — semantics per ``specs/context.txt``."""
+
+    PENDING = "pending"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
