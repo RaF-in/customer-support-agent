@@ -131,7 +131,7 @@ The conversational data layer: a process-wide `psycopg_pool.AsyncConnectionPool`
 
 ## Task T3: Orchestrator foundations + router
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high
