@@ -359,7 +359,7 @@ _uvicorn + an httpx scratch script; fakes via the seam; the decision endpoint's 
 
 ## Task T7: Planner
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high
