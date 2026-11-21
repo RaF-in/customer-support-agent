@@ -19,6 +19,8 @@ commit together or not at all (ARCH A3 — no partially-visible turns).
 """
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID, uuid4
@@ -156,6 +158,40 @@ async def find_message_by_pending_request(
             pending_request_id,
         )
         return None
+
+
+@asynccontextmanager
+async def conversation_turn_lock(conversation_id: UUID) -> AsyncIterator[None]:
+    """Turn-spanning advisory lock (A17) — the T5 declared additive accessor.
+
+    Holds ONE pool connection for the whole block with
+    ``pg_advisory_lock(hashtext(<id>))`` taken on it: same-conversation turns
+    serialize at any worker count (CR-N2), and the lock releases at block
+    exit — or automatically at session death, so a crashed process can never
+    strand a conversation. Unlike the record accessors this primitive
+    *raises* on infrastructure failure (the conversation service, the single
+    catch point, maps that to its one user-meaningful error); a lock held by
+    another turn blocks here server-side — that wait is the serialization
+    working, not an outage.
+    """
+    pool = get_postgres_pool()
+    key = str(conversation_id)
+    async with pool.connection() as conn:
+        await conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        try:
+            yield
+        finally:
+            try:
+                await conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
+            except Exception:
+                # The connection is about to return to the pool (or die);
+                # a session close releases the lock anyway (A17).
+                logger.warning(
+                    "advisory unlock failed for conversation %s; the session "
+                    "close releases it",
+                    conversation_id,
+                    exc_info=True,
+                )
 
 
 # ---------------------------------------------------------------------------

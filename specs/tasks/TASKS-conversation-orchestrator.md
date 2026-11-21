@@ -246,7 +246,7 @@ _The compiled graph driven end-to-end with fakes via the seam; a scratch toy wor
 
 ## Task T5: Conversation service (slice 1)
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical
