@@ -34,10 +34,10 @@ carries the tenant id, and the header check ``WHERE id AND tenant_id``
 makes an unknown and a cross-tenant conversation id raise the byte-identical
 ``ConversationNotFoundError``. Record access goes through the T2 accessors'
 raising twins (``_get_conversation`` & co. — the ``runtime.py`` /
-``ApprovalRecord._retrieve_by_ids`` precedent): a fetch that breaks raises
-into the catch point, while a fetch that finds nothing returns ``None`` —
-which is exactly the no-oracle signal. The turn-spanning advisory lock is
-the one declared additive T2 accessor (``conversation_turn_lock``).
+``domain/approvals.py`` raising-accessor precedent): a fetch that breaks
+raises into the catch point, while a fetch that finds nothing returns
+``None`` — which is exactly the no-oracle signal. The turn-spanning advisory
+lock is the one declared additive T2 accessor (``conversation_turn_lock``).
 
 Logs carry ids and statuses only — never message text, replies, workflow
 payloads, or plan/todo content (CR-N4, PE-N4); ``turn_id`` (the envelope

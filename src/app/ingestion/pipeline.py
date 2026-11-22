@@ -20,7 +20,6 @@ T7); ``process`` receives it already persisted.
 
 import asyncio
 import logging
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -31,19 +30,8 @@ from app.application.preprocessing.dispatchers import (
     CleaningDispatcher,
     EmbeddingDispatcher,
 )
-from app.domain.base.vector import VectorBaseDocument
-from app.domain.chunks import (
-    EmbeddedChunk,
-    EmbeddedDocxChunk,
-    EmbeddedPdfChunk,
-    EmbeddedTextChunk,
-)
-from app.domain.documents import (
-    CleanedDocxDocument,
-    CleanedDocument,
-    CleanedPdfDocument,
-    CleanedTextDocument,
-)
+from app.domain.chunks import EmbeddedChunk
+from app.domain.documents import CleanedDocument
 from app.domain.enums import DataCategory, DocumentStatus
 from app.domain.records import DocumentRecord
 from app.ingestion.validation import validate_document
@@ -54,21 +42,6 @@ _SUFFIX_TO_CATEGORY: dict[str, DataCategory] = {
     ".pdf": DataCategory.PDF,
     ".txt": DataCategory.TEXT,
     ".docx": DataCategory.DOCX,
-}
-
-# Embedded-chunk class per category — LOAD groups inserts by these.
-_CHUNK_CLASS_BY_CATEGORY: dict[DataCategory, type[EmbeddedChunk]] = {
-    DataCategory.PDF: EmbeddedPdfChunk,
-    DataCategory.TEXT: EmbeddedTextChunk,
-    DataCategory.DOCX: EmbeddedDocxChunk,
-}
-
-# Cleaned-document class per category — purged on replace/delete alongside
-# the chunks (deletion removes the document and its extracted content).
-_CLEANED_CLASS_BY_CATEGORY: dict[DataCategory, type[CleanedDocument]] = {
-    DataCategory.PDF: CleanedPdfDocument,
-    DataCategory.TEXT: CleanedTextDocument,
-    DataCategory.DOCX: CleanedDocxDocument,
 }
 
 # One-way lifecycle (REQ domain rules): failed never becomes ready, and a
@@ -200,39 +173,24 @@ class IngestionPipeline:
         cleaned: CleanedDocument,
         embedded: list[EmbeddedChunk],
     ) -> DocumentRecord:
-        """Persist the cleaned doc and the chunks (grouped by class, with
-        the groups inserted in parallel), then the ``ready`` record LAST
-        (A8). Any insert failure purges what this document already wrote
-        and fails — partial chunks never survive."""
-        grouped: dict[type[EmbeddedChunk], list[EmbeddedChunk]] = defaultdict(list)
-        for chunk in embedded:
-            grouped[type(chunk)].append(chunk)
-
-        # Chunk groups first, the cleaned document last — matching the
-        # pre-async write order so the failure reason stays attributable.
-        insert_classes: list[type[VectorBaseDocument]] = [
-            *grouped.keys(),
-            type(cleaned),
-        ]
-        insert_batches: list[list[VectorBaseDocument]] = [*grouped.values(), [cleaned]]
-        results = await asyncio.gather(
-            *(
-                insert_class.bulk_insert(batch)
-                for insert_class, batch in zip(insert_classes, insert_batches)
-            )
+        """Persist the chunks and the cleaned doc (the two collections'
+        inserts in parallel), then the ``ready`` record LAST (A8). Any
+        insert failure purges what this document already wrote and fails —
+        partial chunks never survive. Both collections are unified across
+        formats (``chunks`` / ``cleaned``; the format rides the payload), so
+        one insert each — no per-format grouping."""
+        chunks_ok, cleaned_ok = await asyncio.gather(
+            EmbeddedChunk.bulk_insert(embedded),
+            CleanedDocument.bulk_insert([cleaned]),
         )
-        if not all(results):
-            written = [
-                point_class
-                for point_class, inserted in zip(insert_classes, results)
-                if inserted
-            ]
-            await self._abort_load(record, written)
-            chunk_inserts_ok = all(results[: len(grouped)])
+        if not (chunks_ok and cleaned_ok):
+            # Purge whichever side may have written (A8) — a failed insert
+            # could still have written partial batches.
+            await self._abort_load(record, chunks=chunks_ok, cleaned=cleaned_ok)
             reason = (
-                "vector db unavailable: cleaned document insert failed"
-                if chunk_inserts_ok
-                else "vector db unavailable: chunk insert failed"
+                "vector db unavailable: chunk insert failed"
+                if not chunks_ok
+                else "vector db unavailable: cleaned document insert failed"
             )
             return await self._fail(record, reason, platform=cleaned.platform)
 
@@ -249,16 +207,23 @@ class IngestionPipeline:
         return record
 
     async def _abort_load(
-        self, record: DocumentRecord, written: list[type[VectorBaseDocument]]
+        self, record: DocumentRecord, *, chunks: bool, cleaned: bool
     ) -> None:
-        """Best-effort purge of partially inserted points (A8)."""
-        for point_class in written:
-            if not await point_class.delete_by_filter(record.tenant_id, record.id):
-                logger.error(
-                    "Orphan %s points may remain for document %s",
-                    point_class.__name__,
-                    record.id,
-                )
+        """Best-effort purge of partially inserted points (A8). Each flag
+        says that side's insert reported success — only a successful side
+        can have written points worth purging."""
+        if chunks and not await EmbeddedChunk.delete_by_filter(
+            record.tenant_id, record.id
+        ):
+            logger.error(
+                "Orphan chunk points may remain for document %s", record.id
+            )
+        if cleaned and not await CleanedDocument.delete_by_filter(
+            record.tenant_id, record.id
+        ):
+            logger.error(
+                "Orphan cleaned points may remain for document %s", record.id
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle operations
@@ -304,27 +269,22 @@ class IngestionPipeline:
         """A7 ordering: the record point goes first, awaited on its own (the
         document stops existing for every reader), and only then do the
         chunk/cleaned purges run — those two in parallel, since A7 is order
-        against the record delete, not among the purges. A failed purge
-        leaves orphan points invisible to retrieval — logged, accepted."""
+        against the record delete, not among the purges. Both live in the
+        unified collections (no format lookup — the filter carries the
+        document id). A failed purge leaves orphan points invisible to
+        retrieval — logged, accepted."""
         if not await DocumentRecord.delete_by_ids([record.id]):
             logger.error(
                 "Failed to delete record %s; keeping its points consistent", record.id
             )
             return
-        category = category_from_filename(record.filename)
-        if category is None:
-            return
-        point_classes = (
-            _CHUNK_CLASS_BY_CATEGORY[category],
-            _CLEANED_CLASS_BY_CATEGORY[category],
-        )
         results = await asyncio.gather(
-            *(
-                point_class.delete_by_filter(record.tenant_id, record.id)
-                for point_class in point_classes
-            )
+            EmbeddedChunk.delete_by_filter(record.tenant_id, record.id),
+            CleanedDocument.delete_by_filter(record.tenant_id, record.id),
         )
-        for point_class, deleted in zip(point_classes, results):
+        for point_class, deleted in zip(
+            (EmbeddedChunk, CleanedDocument), results
+        ):
             if not deleted:
                 logger.error(
                     "Orphan %s points may remain for document %s",

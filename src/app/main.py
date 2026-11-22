@@ -37,25 +37,22 @@ async def _bootstrap_collections() -> None:
 
     Collections also auto-create on first insert (OVM fallback), but the
     *search* path has no insert — without this, querying a tenant whose
-    documents never used one of the three chunk formats would hit a
-    missing collection and read as an outage. Payload-only entities get
-    the 1-dim dummy vector size; chunk collections bind to the embedding
-    provider's dim (switching provider = drop + recreate, documented
-    constraint).
+    documents were never ingested would hit a missing ``chunks`` collection
+    and read as an outage. Payload-only entities get the 1-dim dummy vector
+    size; the chunks collection binds to the embedding provider's dim
+    (switching provider = drop + recreate, documented constraint).
 
     Creates run in parallel under a semaphore (AD3/AD4); creation itself
     is race-safe (AD10), so concurrent first-insert auto-creates and
     multi-worker bootstraps converge on the same end state.
+
+    Storage footprint: three collections — ``documents`` (records),
+    ``cleaned``, ``chunks`` — plus the Postgres tables for approvals and
+    action results (row state moved off payload-only Qdrant points).
     """
     # Imported here so importing this module stays free of side effects.
-    from app.domain.action_results import ActionResultRecord
-    from app.domain.approvals import ApprovalRecord
-    from app.domain.chunks import EmbeddedDocxChunk, EmbeddedPdfChunk, EmbeddedTextChunk
-    from app.domain.documents import (
-        CleanedDocxDocument,
-        CleanedPdfDocument,
-        CleanedTextDocument,
-    )
+    from app.domain.chunks import EmbeddedChunk
+    from app.domain.documents import CleanedDocument
     from app.domain.records import DocumentRecord
     from app.infrastructure.embedding.factory import get_embedding_model
     from app.infrastructure.qdrant import create_collection_if_missing
@@ -63,28 +60,17 @@ async def _bootstrap_collections() -> None:
 
     payload_only: list[tuple[str, int]] = [
         (entity.collection_name, 1)  # dummy 1-dim vector (use_vector_index=False)
-        for entity in (
-            DocumentRecord,
-            CleanedPdfDocument,
-            CleanedTextDocument,
-            CleanedDocxDocument,
-            ApprovalRecord,  # approvals queue (graphs T1) — never-inserted
-            ActionResultRecord,  # action audit (graphs T1) — would read as
-            # an outage if a search ever hit it before the first insert
-        )
+        for entity in (DocumentRecord, CleanedDocument)
     ]
     chunk_collections: list[tuple[str, int]] = []
     try:
         dim = get_embedding_model().dim
-        chunk_collections = [
-            (entity.collection_name, dim)
-            for entity in (EmbeddedPdfChunk, EmbeddedTextChunk, EmbeddedDocxChunk)
-        ]
+        chunk_collections = [(EmbeddedChunk.collection_name, dim)]
     except Exception:
         logger.warning(
             "Could not determine embedding dimension for collection bootstrap "
-            "(provider construction failed); chunk collections will be created "
-            "on first insert",
+            "(provider construction failed); the chunks collection will be "
+            "created on first insert",
             exc_info=True,
         )
     try:
@@ -105,7 +91,7 @@ async def _bootstrap_collections() -> None:
     except Exception:
         logger.warning(
             "Collection bootstrap failed (is Qdrant up?); collections will be "
-            "created on first insert. Searching a never-inserted format may "
+            "created on first insert. Searching before the first insert may "
             "return 500 until the server is restarted with Qdrant reachable.",
             exc_info=True,
         )

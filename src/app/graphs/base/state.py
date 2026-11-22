@@ -31,9 +31,8 @@ class WorkflowState(TypedDict):
 
 
 class WorkflowResult(BaseModel):
-    """What ``run_workflow`` / ``resume_workflow`` / ``decide_approval``
-    return — the single outcome type the future orchestrator consumes
-    (R7/R9)."""
+    """What ``run_workflow`` / ``decide_approval`` return — the single
+    outcome type the future orchestrator consumes (R7/R9)."""
 
     status: WorkflowStatus
     output: Any = None

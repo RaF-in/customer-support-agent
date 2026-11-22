@@ -13,8 +13,9 @@ class DocumentStatus(StrEnum):
 class DataCategory(StrEnum):
     """Supported ingestion formats.
 
-    Values drive factory routing and Qdrant collection naming
-    (e.g. `pdfs` -> `cleaned_pdfs` / `pdf_chunks`).
+    Values drive factory routing and the ``format`` payload field on the
+    unified ``chunks`` / ``cleaned`` collections (one collection per stage,
+    not one per format).
     """
 
     PDF = "pdfs"

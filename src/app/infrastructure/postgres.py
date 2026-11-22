@@ -1,18 +1,22 @@
-"""Process-wide async Postgres pool + conversational schema bootstrap (A18).
+"""Process-wide async Postgres pool + schema bootstrap (A18, extended).
 
-The conversational subsystem's storage substrate: one
-``psycopg_pool.AsyncConnectionPool`` at ``POSTGRES_DSN``, opened and entered
-at app lifespan startup beside the Qdrant bootstrap and closed on shutdown
-(``close_postgres()`` — the ``infrastructure/checkpoint.py`` enter/exit
-pattern). ``bootstrap_schema()`` creates the three conversational tables
-idempotently (``CREATE TABLE IF NOT EXISTS`` — additive zero-migration MVP
-schema; no migration framework by decision A18).
+The row-state substrate: one ``psycopg_pool.AsyncConnectionPool`` at
+``POSTGRES_DSN``, opened and entered at app lifespan startup beside the
+Qdrant bootstrap and closed on shutdown (``close_postgres()``).
+``bootstrap_schema()`` creates every table idempotently (``CREATE TABLE IF
+NOT EXISTS`` — additive zero-migration MVP schema; no migration framework
+by decision A18): the three conversational tables (header, append-only
+messages, mutable plans) plus the two human-gate tables (``approval_requests``
+— the pause state of a gated run — and the immutable ``action_results``
+audit), which moved here off Qdrant payload-only points when Postgres
+became a default boot dependency.
 
 Degrade-gracefully, exactly like the Qdrant bootstrap: Postgres unreachable
 at boot ⇒ one warning logged here, ``open_postgres()`` returns False, the
 pool stays closed (``get_postgres_pool()`` then raises — the conversational
-surfaces map that to 500), and the rest of the app is unaffected. Recovery
-is a restart with Postgres reachable — deliberate MVP simplicity.
+and approval surfaces map that to 500), and the rest of the app is
+unaffected. Recovery is a restart with Postgres reachable — deliberate MVP
+simplicity.
 
 Connections are autocommit with ``dict_row`` rows: the *only* transactions
 are the explicit ``conn.transaction()`` blocks the domain accessors open —
@@ -21,9 +25,15 @@ inserts commit together or not at all, ARCH A3). ``max_size`` comes from
 ``POSTGRES_POOL_MAX_SIZE`` — the concurrent-turns lever, because a
 turn-spanning advisory lock holds one connection for the turn's duration
 (A17).
+
+``advisory_lock(key)`` is the generic cross-worker serialization primitive
+built on that pool: conversation turns key it on the conversation id, the
+approval decision guard on ``approval:<request_id>``.
 """
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from psycopg.rows import dict_row
@@ -43,10 +53,14 @@ _pool: Optional[AsyncConnectionPool] = None
 # hanging startup.
 _OPEN_TIMEOUT_SECONDS = 5.0
 
-# Additive MVP schema (A18): header, append-only messages, mutable plans.
-# The UNIQUE (conversation_id, seq) constraint is the no-gaps/no-collisions
-# guarantee behind the turn transaction; the partial index is the CR-R10
-# decision-time pending-request lookup.
+# Additive MVP schema (A18): header, append-only messages, mutable plans,
+# then the human-gate pair — ``approval_requests`` (the pending row IS the
+# pause of a gated run; the queue index serves the decision queue's
+# ``?status=pending`` view directly) and ``action_results`` (immutable
+# execution audit, written once). The UNIQUE (conversation_id, seq)
+# constraint is the no-gaps/no-collisions guarantee behind the turn
+# transaction; the partial indexes are the decision-time pending-request
+# lookups (CR-R10 / PE-R10).
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS conversations (
@@ -95,6 +109,44 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         ON conversation_plans (tenant_id, pending_request_id)
         WHERE pending_request_id IS NOT NULL
     """,
+    """
+    CREATE TABLE IF NOT EXISTS approval_requests (
+        id            UUID PRIMARY KEY,
+        tenant_id     TEXT NOT NULL,
+        action_name   TEXT NOT NULL,
+        action_input  JSONB NOT NULL,
+        reason        TEXT NOT NULL,
+        risk_level    TEXT NOT NULL,
+        approver_role TEXT NOT NULL,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        decided_by    TEXT,
+        decision_note TEXT,
+        decided_at    TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # The decision queue: GET /approvals[?status=pending] is served by this
+    # index (tenant + status + recency), never a full-table read.
+    """
+    CREATE INDEX IF NOT EXISTS approval_requests_queue_idx
+        ON approval_requests (tenant_id, status, created_at)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS action_results (
+        id          UUID PRIMARY KEY,
+        tenant_id   TEXT NOT NULL,
+        action_name TEXT NOT NULL,
+        approval_id UUID,
+        status      TEXT NOT NULL,
+        result      JSONB NOT NULL DEFAULT '{}'::jsonb,
+        error       TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS action_results_approval_idx
+        ON action_results (tenant_id, approval_id)
+    """,
 )
 
 
@@ -111,6 +163,46 @@ def get_postgres_pool() -> AsyncConnectionPool:
             "shutting down); conversational surfaces are unavailable."
         )
     return _pool
+
+
+@asynccontextmanager
+async def advisory_lock(key: str) -> AsyncIterator[None]:
+    """Session-scoped Postgres advisory lock under one pool connection.
+
+    Holds ONE connection for the whole block with
+    ``pg_advisory_lock(hashtext(<key>))`` taken on it: callers keyed on the
+    same string serialize at any worker count (every worker shares the one
+    Postgres lock manager), and the lock releases at block exit — or
+    automatically at session death, so a crashed process can never strand a
+    key. The registry is Postgres-internal memory (visible through the
+    ``pg_locks`` system view), not a table — nothing persists and nothing
+    needs cleanup. Callers must namespace their keys (``approval:<id>``,
+    a bare conversation id) so independent guards never collide.
+
+    Raises on infrastructure failure (pool closed, or the lock statement
+    itself broke) — callers decide what that means; a lock held by another
+    caller blocks here server-side, which is the serialization working,
+    not an outage.
+    """
+    pool = get_postgres_pool()
+    async with pool.connection() as conn:
+        await conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
+        try:
+            yield
+        finally:
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_unlock(hashtext(%s))", (key,)
+                )
+            except Exception:
+                # The connection is about to return to the pool (or die);
+                # a session close releases the lock anyway (A17).
+                logger.warning(
+                    "advisory unlock failed for key %r; the session close "
+                    "releases it",
+                    key,
+                    exc_info=True,
+                )
 
 
 async def _bootstrap_schema(pool: AsyncConnectionPool) -> None:
@@ -163,9 +255,9 @@ async def open_postgres(settings: Optional[Settings] = None) -> bool:
     except Exception:
         logger.warning(
             "Postgres unavailable at boot (endpoint unreachable or schema "
-            "bootstrap failed); conversational surfaces will return 500 "
-            "until the app is restarted with Postgres reachable. Documents, "
-            "search, and approvals are unaffected.",
+            "bootstrap failed); conversational and approval surfaces will "
+            "return 500 until the app is restarted with Postgres reachable. "
+            "Documents and search are unaffected.",
             exc_info=True,
         )
         if pool is not None:

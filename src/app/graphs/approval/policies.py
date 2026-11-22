@@ -25,7 +25,7 @@ class PolicyOutcome(BaseModel):
 
     ``reason`` / ``risk_level`` / ``approver_role`` are populated when (and
     only when) approval is required — they ride the pending-approval payload
-    into the ``ApprovalRecord`` once T7 persists it.
+    into the ``ApprovalRecord`` row the runtime persists at the gate.
     """
 
     required: bool

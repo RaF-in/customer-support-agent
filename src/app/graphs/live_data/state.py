@@ -8,10 +8,11 @@ the agent ↔ ToolNode loop (A12).
 
 The tenant's MCP tools ride in state for the life of one run: resolved by
 the agent node's first entry, consumed by the agent (``bind_tools``) and
-the prebuilt ``ToolNode``. They are deliberately transient — this graph has
-no checkpointer, and if one is ever attached the tool objects must move out
-of state (they are not serializable); noted here so that change is not
-discovered late.
+the prebuilt ``ToolNode``. They are deliberately transient — no graph in
+this system checkpoints its state (the one checkpointer that existed was
+deleted with the interrupt-based approval flow), and if one is ever
+introduced the tool objects must move out of state (they are not
+serializable); noted here so that change is not discovered late.
 """
 
 from typing import Annotated, Any

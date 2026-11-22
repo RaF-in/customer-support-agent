@@ -36,6 +36,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.domain import action_results
 from app.domain.action_results import ActionResultRecord
 from app.domain.enums import ActionStatus
 from app.graphs.actions.contracts import (
@@ -144,12 +145,12 @@ async def approval_gate_node(state: ActionExecutionState) -> dict[str, Any]:
 
     Required → this node writes the pending-approval terminal state itself:
     a fresh ``request_id`` plus the full request payload (action, input,
-    reason, risk level, approver role) that T7's approval graph persists as
-    an ``ApprovalRecord``.
+    reason, risk level, approver role) that the runtime facade persists as
+    a pending ``ApprovalRecord`` row — the pause.
 
-    T7 chaining: when the runtime re-invokes this graph on an *approved*
-    request (``approval_id`` set), a recorded human decision has already
-    satisfied the policy — the gate does not re-evaluate and the run
+    Runtime chaining: when the facade re-invokes this graph on an
+    *approved* request (``approval_id`` set), a recorded human decision has
+    already satisfied the policy — the gate does not re-evaluate and the run
     proceeds to execute (re-validation happened in ``validate`` above).
     This is the one sanctioned T6-file edit of the T7 slice (developer
     decision, 2026-11-17): the ``approval_id`` channel this check reads was
@@ -238,11 +239,12 @@ async def record_result_node(state: ActionExecutionState) -> dict[str, Any]:
         result=result_payload,
         error=reason,
     )
-    persisted = await ActionResultRecord.bulk_insert([record])
-    if not persisted:
+    try:
+        record = await action_results.record_action_result(record)
+    except Exception as error:
         raise RuntimeError(
-            "action result could not be persisted (vector db unavailable)"
-        )
+            "action result could not be persisted (postgres unavailable)"
+        ) from error
     logger.info(
         "action %s %s (tenant=%s run_id=%s record_id=%s)",
         state["action_name"],

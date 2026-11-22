@@ -22,9 +22,9 @@ venv/
 .coverage
 htmlcov/
 
-# --- LangGraph sqlite checkpointer ------------------------------------------
-# Local runtime state (SQLITE_CHECKPOINT_PATH, default checkpoints.sqlite)
-# — deletable, never committed.
+# --- Local sqlite state -------------------------------------------------------
+# Deletable local runtime state (e.g. the retired checkpointer's
+# checkpoints.sqlite left over from before its deletion), never committed.
 *.sqlite
 
 # --- Verification scratch files --------------------------------------------

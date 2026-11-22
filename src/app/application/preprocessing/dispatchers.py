@@ -1,11 +1,11 @@
 """Dispatchers and factories — the routing layer between the pipeline and
 the per-format handlers (A6: Factory + Strategy).
 
-Each pipeline stage has one dispatcher: cleaning routes on an explicit
-``DataCategory`` (its input is raw bytes); chunking and embedding route on
-the typed ``Cleaned*Document``. Unknown formats raise — never a silent
-wrong route. Adding a format = new handlers + one factory branch; zero
-pipeline or API changes.
+Each pipeline stage has one dispatcher routing on the ``DataCategory``:
+cleaning takes the category from the upload's filename suffix, chunking and
+embedding from the cleaned document's ``format`` field. Unknown formats
+raise — never a silent wrong route. Adding a format = new handlers + one
+factory branch; zero pipeline or API changes.
 """
 
 import logging
@@ -32,12 +32,7 @@ from app.application.preprocessing.embedding_data_handlers import (
     TextEmbeddingHandler,
 )
 from app.domain.chunks import Chunk, EmbeddedChunk
-from app.domain.documents import (
-    CleanedDocxDocument,
-    CleanedDocument,
-    CleanedPdfDocument,
-    CleanedTextDocument,
-)
+from app.domain.documents import CleanedDocument
 from app.domain.enums import DataCategory
 
 logger = logging.getLogger(__name__)
@@ -169,58 +164,60 @@ class CleaningDispatcher:
 
 
 class ChunkingDispatcher:
-    """Routes the CHUNK stage on the typed ``Cleaned*Document``."""
+    """Routes the CHUNK stage on the cleaned document's ``format``."""
 
     _factories: ClassVar[
-        dict[type[CleanedDocument], type[ChunkingDataHandlerFactory]]
+        dict[DataCategory, type[ChunkingDataHandlerFactory]]
     ] = {
-        CleanedPdfDocument: PdfChunkingFactory,
-        CleanedTextDocument: TextChunkingFactory,
-        CleanedDocxDocument: DocxChunkingFactory,
+        DataCategory.PDF: PdfChunkingFactory,
+        DataCategory.TEXT: TextChunkingFactory,
+        DataCategory.DOCX: DocxChunkingFactory,
     }
 
     @classmethod
     def dispatch(cls, *, data_model: CleanedDocument) -> list[Chunk]:
-        factory = cls._factories.get(type(data_model))
+        factory = cls._factories.get(data_model.format)
         if factory is None:
+            supported = sorted(c.value for c in cls._factories)
             raise ValueError(
-                "Unsupported cleaned document type for chunking: "
-                f"{type(data_model).__name__}."
+                f"Unsupported format for chunking: {data_model.format!r}. "
+                f"Supported: {supported}."
             )
         handler = factory.create_handler()
         logger.debug(
             "Chunking dispatch: %s -> %s",
-            type(data_model).__name__,
+            data_model.format,
             type(handler).__name__,
         )
         return handler.chunk(data_model=data_model)
 
 
 class EmbeddingDispatcher:
-    """Routes the EMBED stage on the typed ``Cleaned*Document``."""
+    """Routes the EMBED stage on the cleaned document's ``format``."""
 
     _factories: ClassVar[
-        dict[type[CleanedDocument], type[EmbeddingDataHandlerFactory]]
+        dict[DataCategory, type[EmbeddingDataHandlerFactory]]
     ] = {
-        CleanedPdfDocument: PdfEmbeddingFactory,
-        CleanedTextDocument: TextEmbeddingFactory,
-        CleanedDocxDocument: DocxEmbeddingFactory,
+        DataCategory.PDF: PdfEmbeddingFactory,
+        DataCategory.TEXT: TextEmbeddingFactory,
+        DataCategory.DOCX: DocxEmbeddingFactory,
     }
 
     @classmethod
     async def dispatch(
         cls, *, data_model: CleanedDocument, chunks: list[Chunk]
     ) -> list[EmbeddedChunk]:
-        factory = cls._factories.get(type(data_model))
+        factory = cls._factories.get(data_model.format)
         if factory is None:
+            supported = sorted(c.value for c in cls._factories)
             raise ValueError(
-                "Unsupported cleaned document type for embedding: "
-                f"{type(data_model).__name__}."
+                f"Unsupported format for embedding: {data_model.format!r}. "
+                f"Supported: {supported}."
             )
         handler = factory.create_handler()
         logger.debug(
             "Embedding dispatch: %s -> %s",
-            type(data_model).__name__,
+            data_model.format,
             type(handler).__name__,
         )
         return await handler.embed(data_model=data_model, chunks=chunks)

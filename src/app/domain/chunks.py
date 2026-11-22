@@ -1,5 +1,14 @@
 """Chunk entities — the agent-facing searchable units and their
-pre-embedding form."""
+pre-embedding form.
+
+One storage class per stage: transient ``Chunk`` (the chunking-stage
+output, never stored) and ``EmbeddedChunk`` (the single similarity-
+searchable entity, in the single ``chunks`` collection). The upload format
+rides the point as a ``format`` payload field — the former per-format
+collections (``pdf_chunks`` / ``text_chunks`` / ``docx_chunks``) were
+consolidated into one, so retrieval is a single query instead of a three-
+way gathered fan-out.
+"""
 
 import hashlib
 from typing import Any, ClassVar
@@ -22,7 +31,8 @@ def generate_chunk_id(content: str, document_id: str | UUID) -> UUID:
 class Chunk(VectorBaseDocument):
     """A passage split from a cleaned document. Transient: plain chunks are
     the chunking-stage output and declare no collection — only
-    ``EmbeddedChunk`` subclasses are stored (A8).
+    ``EmbeddedChunk`` is stored (A8). Format-free by design; the embedding
+    stage stamps ``format`` when it builds the storable twin.
 
     ``metadata`` carries: ``chunk_size``, ``overlap``, ``embedding_model_id``
     (written by T5) and ``unreliable_table`` (R9).
@@ -43,35 +53,15 @@ class Chunk(VectorBaseDocument):
 
 
 class EmbeddedChunk(Chunk):
-    """A chunk with its embedding — the only similarity-searchable entity."""
+    """A chunk with its embedding — the only similarity-searchable entity.
+
+    One ``chunks`` collection for every format; ``format`` records which
+    extraction produced the passage (payload field, not a collection —
+    introspection without a fan-out).
+    """
 
     embedding: list[float]
+    format: DataCategory
 
+    collection_name: ClassVar[str] = "chunks"
     use_vector_index: ClassVar[bool] = True
-
-
-class PdfChunk(Chunk):
-    category: ClassVar[DataCategory] = DataCategory.PDF
-
-
-class TextChunk(Chunk):
-    category: ClassVar[DataCategory] = DataCategory.TEXT
-
-
-class DocxChunk(Chunk):
-    category: ClassVar[DataCategory] = DataCategory.DOCX
-
-
-class EmbeddedPdfChunk(EmbeddedChunk):
-    collection_name: ClassVar[str] = "pdf_chunks"
-    category: ClassVar[DataCategory] = DataCategory.PDF
-
-
-class EmbeddedTextChunk(EmbeddedChunk):
-    collection_name: ClassVar[str] = "text_chunks"
-    category: ClassVar[DataCategory] = DataCategory.TEXT
-
-
-class EmbeddedDocxChunk(EmbeddedChunk):
-    collection_name: ClassVar[str] = "docx_chunks"
-    category: ClassVar[DataCategory] = DataCategory.DOCX

@@ -1,11 +1,10 @@
 """Per-format cleaning handlers — the EXTRACT/CLEAN stage (R2, R9).
 
-Each handler turns raw uploaded bytes into a ``Cleaned*Document``: full
-extracted text, ``platform`` (extraction source), and ``metadata``
-(extraction stats + table flags). PDF pages route between embedded-text
-extraction and Tesseract OCR per page (A9); tables are never rejected —
-extracted best-effort and flagged (R9). Dispatcher wiring arrives in T5;
-until then handlers are invoked directly.
+Each handler turns raw uploaded bytes into a ``CleanedDocument`` tagged
+with its ``format``: full extracted text, ``platform`` (extraction source),
+and ``metadata`` (extraction stats + table flags). PDF pages route between
+embedded-text extraction and Tesseract OCR per page (A9); tables are never
+rejected — extracted best-effort and flagged (R9).
 """
 
 import io
@@ -19,12 +18,7 @@ import pytesseract
 from docx import Document as DocxDocument
 from PIL import Image  # Pillow ships as a pytesseract dependency
 
-from app.domain.documents import (
-    CleanedDocument,
-    CleanedDocxDocument,
-    CleanedPdfDocument,
-    CleanedTextDocument,
-)
+from app.domain.documents import CleanedDocument
 from app.domain.enums import DataCategory
 
 logger = logging.getLogger(__name__)
@@ -56,7 +50,7 @@ class PdfCleaningHandler(CleaningDataHandler):
 
     def clean(
         self, *, content: bytes, document_id: UUID, tenant_id: str
-    ) -> CleanedPdfDocument:
+    ) -> CleanedDocument:
         document = pymupdf.open(stream=content, filetype="pdf")
         try:
             page_texts: list[str] = []
@@ -91,11 +85,12 @@ class PdfCleaningHandler(CleaningDataHandler):
             tables_found,
             platform,
         )
-        return CleanedPdfDocument(
+        return CleanedDocument(
             document_id=document_id,
             tenant_id=tenant_id,
             content="\n\n".join(page_texts),
             platform=platform,
+            format=DataCategory.PDF,
             metadata=metadata,
         )
 
@@ -121,14 +116,15 @@ class TextCleaningHandler(CleaningDataHandler):
 
     def clean(
         self, *, content: bytes, document_id: UUID, tenant_id: str
-    ) -> CleanedTextDocument:
+    ) -> CleanedDocument:
         text = content.decode("utf-8", errors="replace").strip()
         logger.info("Text extraction complete: %d chars", len(text))
-        return CleanedTextDocument(
+        return CleanedDocument(
             document_id=document_id,
             tenant_id=tenant_id,
             content=text,
             platform="text",
+            format=DataCategory.TEXT,
             metadata={"num_chars": len(text)},
         )
 
@@ -140,7 +136,7 @@ class DocxCleaningHandler(CleaningDataHandler):
 
     def clean(
         self, *, content: bytes, document_id: UUID, tenant_id: str
-    ) -> CleanedDocxDocument:
+    ) -> CleanedDocument:
         document = DocxDocument(io.BytesIO(content))
         parts = [
             paragraph.text
@@ -164,10 +160,11 @@ class DocxCleaningHandler(CleaningDataHandler):
             len(document.paragraphs),
             tables_found,
         )
-        return CleanedDocxDocument(
+        return CleanedDocument(
             document_id=document_id,
             tenant_id=tenant_id,
             content="\n".join(parts),
             platform="docx",
+            format=DataCategory.DOCX,
             metadata=metadata,
         )

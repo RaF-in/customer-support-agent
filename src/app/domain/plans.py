@@ -66,7 +66,8 @@ class PlanStep(BaseModel):
 class PlanRecord(BaseModel):
     """Row model for one ``conversation_plans`` row — the mutable working
     state the resume path re-seeds the graph from (deploy-safe pauses: the
-    row survives redeploys, unlike checkpoint state)."""
+    row survives redeploys; the same row-based pause the approvals
+    consolidated onto when the checkpointer was deleted)."""
 
     id: UUID = Field(default_factory=uuid4)
     tenant_id: str

@@ -1,6 +1,6 @@
 """Per-format chunking handlers — the CHUNK stage.
 
-Each handler splits a ``Cleaned*Document`` into typed, transient ``Chunk``
+Each handler splits a ``CleanedDocument`` into transient ``Chunk``
 entities with LangChain's ``RecursiveCharacterTextSplitter`` (REQ Decision
 10 preference). Size and overlap come from settings (A10); the effective
 size also respects the embedding provider's ``max_input_length`` so no
@@ -9,7 +9,7 @@ MD5(content + document_id) derivation, making re-uploads upsert
 idempotently.
 
 The splitting logic is format-independent — subclasses only declare the
-``DataCategory`` they serve and the transient chunk class they produce.
+``DataCategory`` they serve (the extension slot for per-format chunk sizes).
 """
 
 import logging
@@ -18,7 +18,7 @@ from typing import ClassVar, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.domain.chunks import Chunk, DocxChunk, PdfChunk, TextChunk
+from app.domain.chunks import Chunk
 from app.domain.documents import CleanedDocument
 from app.domain.enums import DataCategory
 from app.infrastructure.embedding.base import EmbeddingProvider
@@ -32,7 +32,6 @@ class ChunkingDataHandler(ABC):
     """Strategy: split one cleaned format into chunks."""
 
     category: ClassVar[DataCategory]
-    chunk_class: ClassVar[type[Chunk]]
 
     def __init__(self, embedding_provider: Optional[EmbeddingProvider] = None) -> None:
         # The provider is consulted for max_input_length only (never called
@@ -62,7 +61,7 @@ class ChunkingDataHandler(ABC):
         texts = splitter.split_text(data_model.content)
         unreliable_table = bool(data_model.metadata.get("has_unreliable_tables", False))
         chunks = [
-            self.chunk_class(
+            Chunk(
                 tenant_id=data_model.tenant_id,
                 document_id=data_model.document_id,
                 content=text,
@@ -87,14 +86,11 @@ class ChunkingDataHandler(ABC):
 
 class PdfChunkingHandler(ChunkingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.PDF
-    chunk_class: ClassVar[type[Chunk]] = PdfChunk
 
 
 class TextChunkingHandler(ChunkingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.TEXT
-    chunk_class: ClassVar[type[Chunk]] = TextChunk
 
 
 class DocxChunkingHandler(ChunkingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.DOCX
-    chunk_class: ClassVar[type[Chunk]] = DocxChunk

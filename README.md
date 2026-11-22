@@ -3,7 +3,9 @@
 A FastAPI backend that accepts PDF / TXT / .docx uploads for a named tenant and runs
 the ingestion pipeline **synchronously** — clean → chunk → embed → index — returning
 the document's terminal status (`ready` or `failed` with reason) in the response.
-All persistence lives in a single Qdrant instance.
+Vector data (documents, chunks, cleaned text) lives in Qdrant; row state
+(conversation transcripts, plan records, approval requests, action-result audit)
+lives in Postgres.
 
 ## Prerequisites
 
@@ -69,9 +71,7 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `POSTGRES_POOL_MAX_SIZE` | `10` | Postgres pool size — the concurrent-turns lever (one held connection per active turn) |
 | `MCP_SERVERS` | `{}` | MCP tool servers (JSON, langchain-mcp-adapters client format) |
 | `MCP_TENANT_ALLOWLIST` | `{}` | Per-tenant tool allowlist (JSON, tenant → [tools]); deny-by-default |
-| `CHECKPOINT_BACKEND` | `sqlite` | LangGraph checkpointer: `sqlite` or `postgres` (unknown fails fast) |
-| `SQLITE_CHECKPOINT_PATH` | `checkpoints.sqlite` | Sqlite checkpointer file (local runtime state, gitignored) |
-| `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN — transcripts (and the postgres checkpointer); the compose service starts by default |
+| `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN — transcripts, plan records, approval requests, action-result audit; the compose service starts by default |
 
 **Port conflict on 6333?** Set `QDRANT_PORT` in `.env` (host port) and point
 `QDRANT_URL` at the new port — never edit `docker-compose.yml` directly.
@@ -93,46 +93,44 @@ src/app/
 │   ├── settings.py               # typed configuration                      [T1]
 │   ├── qdrant.py                 # connection + collection bootstrap        [T2]
 │   ├── embedding/                # EmbeddingProvider protocol + OpenAI impl [T3]
-│   ├── llm/                      # purpose-keyed chat-model factory + fake-
-│   │                             #   injection seam (verification)          [graphs T1]
-│   └── checkpoint.py             # sqlite | postgres checkpointer wiring    [graphs T1]
+│   └── llm/                      # purpose-keyed chat-model factory + fake-
+│                                 #   injection seam (verification)          [graphs T1]
 └── main.py                       # FastAPI app factory                      [T7]
 ```
 
-New domain records (both payload-only Qdrant points, tenant-scoped like
-`DocumentRecord`): `domain/approvals.py` — `ApprovalRecord` (collection
-`approvals`; `id` = `request_id` = LangGraph `thread_id`) and
-`domain/action_results.py` — `ActionResultRecord` (collection
-`action_results`; immutable execution audit). Both collections are created
-at app bootstrap.
+Human-gate state is Postgres row state (created when Postgres became a
+default boot dependency — both previously rode Qdrant as payload-only
+points with dummy vectors): `domain/approvals.py` — `ApprovalRecord`
+(table `approval_requests`; `id` = `request_id`; the queue index serves
+`GET /approvals?status=pending` directly) and `domain/action_results.py` —
+`ActionResultRecord` (table `action_results`; immutable execution audit).
+Both tables are created by the idempotent schema bootstrap at startup.
 
-## Approvals & checkpointing (graphs T7)
+## Approvals (row-based pause)
 
-The approval workflow is the system's only *stateful* graph: a run gated by
-an approval policy pauses at an `interrupt()` (checkpointed under
-`thread_id = request_id`) and resumes when a decision is recorded —
-durable across processes via the checkpointer (`CHECKPOINT_BACKEND`).
-
-**Deploy rule — drain pending approvals before changing the approval
-graph.** LangGraph checkpoints are node-topology-sensitive: a pending
-approval's checkpoint references the exact node structure that paused it.
-Before deploying structural changes to `graphs/approval/` (renaming,
-adding, or removing nodes), decide or otherwise drain every pending
-approval — an old checkpoint resumed against a new topology fails.
+A run gated by an approval policy does not pause in a graph — it persists
+a `pending` `ApprovalRecord` row and returns `pending_approval`. The row
+IS the pause; recording a decision resumes it: `decide_approval` runs
+under `pg_advisory_lock("approval:<id>")` (one held pool connection, the
+same primitive as the conversation turn lock), re-checks the row is still
+pending, then performs a guarded UPDATE (`WHERE status = 'pending'` — a
+racing second decision matches zero rows and raises 409) and, on approval,
+re-invokes the action-execution graph. This is the same pause/resume shape
+as the orchestrator's `PlanRecord`; the former interrupt()/checkpointer
+mechanism (and its `CHECKPOINT_BACKEND` wiring, thread-id discipline,
+sqlite single-writer limit, drain-before-redeploy rule, and degraded-mode
+lock fallback) was deleted with it.
 
 Operational constraints:
 
-- The sqlite checkpointer (`CHECKPOINT_BACKEND=sqlite`, the default) is
-  **single-writer** — fine for a single-process deployment; run multiple
-  workers only with the postgres backend (`CHECKPOINT_BACKEND=postgres`;
-  the compose postgres service starts by default).
-- Decision locking is process-local (per-`request_id` asyncio lock in
-  `graphs/runtime.py`); the same-moment double-decision guarantee holds
-  within one worker. Multi-worker needs the postgres path plus a
-  DB-level guard.
-- `checkpoints.sqlite` is local runtime state (gitignored); deleting it
-  abandons any paused approvals — their `ApprovalRecord`s stay `pending`
-  in the queue forever (no expiry mechanism yet).
+- Approvals require Postgres (the rows live there). With Postgres
+  unreachable at boot, gated runs fail (`failed`) and the approvals API
+  returns 500 until the app is restarted with Postgres reachable.
+- Decision locking is cross-worker at any worker count: every worker
+  shares the one Postgres lock manager via `pg_advisory_lock`.
+- Pending approvals survive redeploys unchanged — the pause is a database
+  row, never a topology-sensitive checkpoint. There is no expiry
+  mechanism yet (`expired` stays reserved).
 
 ## Conversational subsystem (orchestrator — landing task by task)
 
@@ -154,9 +152,8 @@ src/app/
 └── infrastructure/postgres.py      # async pool + schema bootstrap            [conv T2]
 ```
 
-**Postgres is a default boot dependency for this subsystem** —
-`docker compose up -d` starts it alongside Qdrant. The bootstrap is
-degrade-graceful: without Postgres at boot the app still starts and
-documents/search/approvals behave normally, while the conversational
-surfaces return 500 until it is healthy. `CHECKPOINT_BACKEND` (sqlite
-default) is independent of the transcript store.
+**Postgres is a default boot dependency for this subsystem and for the
+approvals queue** — `docker compose up -d` starts it alongside Qdrant.
+The bootstrap is degrade-graceful: without Postgres at boot the app still
+starts and documents/search behave normally, while the conversational and
+approval surfaces return 500 until it is healthy.

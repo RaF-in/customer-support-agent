@@ -10,10 +10,10 @@
 
 ``validate`` and ``approval_gate`` are conditional forks; ``record_result``
 is the single terminal for every executed or business-failed path; the
-approval gate ends the run itself when a policy requires a human. T7
-persists the ``ApprovalRecord`` and chains the two graphs through the
-runtime — nothing in this graph knows about that (graphs never import each
-other, A3).
+approval gate ends the run itself when a policy requires a human. The
+runtime facade persists the pending ``ApprovalRecord`` row (the pause) and
+re-invokes this graph on approval — nothing in this graph knows about that
+(graphs never import each other, A3).
 
 The graph is acyclic, so no counter bounds apply (A12 governs cycles); the
 process-wide ``recursion_limit`` backstop still wraps every run. Business

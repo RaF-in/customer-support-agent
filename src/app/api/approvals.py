@@ -3,14 +3,16 @@
     GET  /tenants/{tenant_id}/approvals[?status=pending]
     POST /tenants/{tenant_id}/approvals/{request_id}/decision
 
-This surface is deliberately thin (A4): it exists so the interrupt→resume
-flow is exercisable end-to-end before any orchestrator. All semantics live
+This surface is deliberately thin (A4): it exists so the pause→resume flow
+is exercisable end-to-end before any orchestrator. All semantics live
 behind the runtime facade — ``decide_approval`` is this module's only
 workflow dependency (ARCH Module Boundaries: ``api/`` touches the runtime
 facade only); the module itself is parsing + error mapping, the same shape
 as ``api/search.py``. On approve, the gated action executes synchronously
 inside the facade call and its result fields ride back in the 200 body
-(R11); a rejection is terminal — no re-invocation (R5).
+(R11); a rejection is terminal — no re-invocation (R5). The queue itself is
+one indexed Postgres query (``approval_requests_queue_idx``) — never a full
+collection read.
 
 ``tenant_id`` comes from the URL path only (A3/A4); ``decided_by`` is
 declared audit identity recorded on the decision, never enforcement (no
@@ -27,7 +29,7 @@ from fastapi import APIRouter, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from app.application import conversations as conversation_service
-from app.domain.approvals import ApprovalRecord
+from app.domain import approvals
 from app.domain.enums import ActionStatus, ApprovalStatus
 from app.graphs.base.state import WorkflowStatus
 from app.graphs.runtime import (
@@ -57,6 +59,27 @@ class ApprovalSummary(BaseModel):
     created_at: datetime
 
 
+async def _tenant_approvals(
+    tenant_id: str, status: Optional[ApprovalStatus]
+) -> list["approvals.ApprovalRecord"]:
+    """The tenant's approval requests — one indexed query (status filter
+    and recency ordering pushed down to Postgres).
+
+    Raises HTTPException 500 when the approval store is unavailable
+    (infrastructure outage — the one case ARCH allows a 500 for).
+    """
+    try:
+        return await approvals.list_approvals(tenant_id, status=status)
+    except Exception:
+        logger.exception(
+            "approval queue read failed (tenant=%s)", tenant_id
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="approval store unavailable: could not list approvals",
+        ) from None
+
+
 class DecisionRequest(BaseModel):
     """The human's decision. ``decided_by`` is declared audit identity
     recorded on the ``ApprovalRecord`` — not enforcement (no auth exists)."""
@@ -83,20 +106,6 @@ class DecisionResponse(BaseModel):
     record_id: Optional[str] = None
 
 
-async def _tenant_approvals(tenant_id: str) -> list[ApprovalRecord]:
-    """Every approval record of one tenant — one full scroll via the OVM.
-
-    Raises HTTPException 500 when Qdrant is unavailable (infrastructure
-    outage — the one case ARCH allows a 500 for).
-    """
-    records = await ApprovalRecord.bulk_find_all(tenant_id)
-    if records is None:
-        raise HTTPException(
-            status_code=500, detail="vector db unavailable: could not list approvals"
-        )
-    return records
-
-
 @router.get("/approvals", response_model=list[ApprovalSummary])
 async def list_approvals(
     tenant_id: str = Path(min_length=1), status: Optional[ApprovalStatus] = None
@@ -104,12 +113,10 @@ async def list_approvals(
     """List this tenant's approval requests — the decision queue (R11).
 
     ``?status=pending`` narrows the view to what awaits a human; unfiltered,
-    decided requests are included with their audit fields.
+    decided requests are included with their audit fields. Newest first
+    (``created_at DESC`` — the queue index's ordering).
     """
-    records = await _tenant_approvals(tenant_id)
-    records.sort(key=lambda r: (r.created_at, str(r.id)), reverse=True)
-    if status is not None:
-        records = [record for record in records if record.status == status]
+    records = await _tenant_approvals(tenant_id, status)
     return [
         ApprovalSummary(
             request_id=str(record.id),
@@ -141,8 +148,9 @@ async def decide(
 
     404 for an unknown ``request_id`` — or another tenant's (the same
     response, no oracle, R3); 409 when the request is no longer pending;
-    500 for infrastructure failures (the request may still be pending —
-    check via GET).
+    500 for infrastructure failures. The decision row is written before the
+    action runs, so a 500 here usually means execution failed after the
+    decision was recorded — check the request's status via GET.
     """
     try:
         result = await decide_approval(
@@ -163,8 +171,9 @@ async def decide(
             status_code=409, detail="approval request is no longer pending"
         ) from None
     if result.status == WorkflowStatus.FAILED:
-        # Infrastructure class (the facade never leaks exceptions): the
-        # record may or may not have been updated — point at the queue.
+        # Infrastructure class (the facade never leaks exceptions): with the
+        # decision row written before execution, a failure here is most
+        # often the action run — point at the queue for the recorded state.
         logger.error(
             "approval decision failed over HTTP (tenant=%s request_id=%s)",
             tenant_id,
@@ -173,8 +182,8 @@ async def decide(
         raise HTTPException(
             status_code=500,
             detail=(
-                "infrastructure failure while deciding — the approval may "
-                "still be pending; check via GET"
+                "infrastructure failure while deciding — the decision, if "
+                "reached, is recorded; check the request via GET"
             ),
         ) from None
     output = result.output if isinstance(result.output, dict) else {}

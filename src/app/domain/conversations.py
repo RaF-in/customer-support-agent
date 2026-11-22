@@ -29,7 +29,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.domain.enums import MessageKind, MessageRole
-from app.infrastructure.postgres import get_postgres_pool
+from app.infrastructure.postgres import advisory_lock, get_postgres_pool
 
 logger = logging.getLogger(__name__)
 
@@ -164,34 +164,18 @@ async def find_message_by_pending_request(
 async def conversation_turn_lock(conversation_id: UUID) -> AsyncIterator[None]:
     """Turn-spanning advisory lock (A17) — the T5 declared additive accessor.
 
-    Holds ONE pool connection for the whole block with
-    ``pg_advisory_lock(hashtext(<id>))`` taken on it: same-conversation turns
-    serialize at any worker count (CR-N2), and the lock releases at block
-    exit — or automatically at session death, so a crashed process can never
-    strand a conversation. Unlike the record accessors this primitive
-    *raises* on infrastructure failure (the conversation service, the single
-    catch point, maps that to its one user-meaningful error); a lock held by
-    another turn blocks here server-side — that wait is the serialization
-    working, not an outage.
+    Delegates to ``infrastructure.postgres.advisory_lock`` keyed on the
+    conversation id: same-conversation turns serialize at any worker count
+    (CR-N2), and the lock releases at block exit — or automatically at
+    session death, so a crashed process can never strand a conversation.
+    Unlike the record accessors this primitive *raises* on infrastructure
+    failure (the conversation service, the single catch point, maps that
+    to its one user-meaningful error); a lock held by another turn blocks
+    here server-side — that wait is the serialization working, not an
+    outage.
     """
-    pool = get_postgres_pool()
-    key = str(conversation_id)
-    async with pool.connection() as conn:
-        await conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (key,))
-        try:
-            yield
-        finally:
-            try:
-                await conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (key,))
-            except Exception:
-                # The connection is about to return to the pool (or die);
-                # a session close releases the lock anyway (A17).
-                logger.warning(
-                    "advisory unlock failed for conversation %s; the session "
-                    "close releases it",
-                    conversation_id,
-                    exc_info=True,
-                )
+    async with advisory_lock(str(conversation_id)):
+        yield
 
 
 # ---------------------------------------------------------------------------

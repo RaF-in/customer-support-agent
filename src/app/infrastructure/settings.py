@@ -64,10 +64,7 @@ class Settings(BaseSettings):
     MCP_SERVERS: dict[str, Any] = Field(default_factory=dict)
     MCP_TENANT_ALLOWLIST: dict[str, list[str]] = Field(default_factory=dict)
 
-    # LangGraph checkpointer (approval-graph persistence, A7): sqlite needs
-    # no extra infra (single-writer dev limit); postgres is the default
-    # compose service (conversation transcripts) and doubles as the
-    # multi-worker checkpointer backend.
-    CHECKPOINT_BACKEND: str = "sqlite"
-    SQLITE_CHECKPOINT_PATH: str = "checkpoints.sqlite"
+    # Postgres — the row-state substrate: conversation transcripts, plan
+    # working records, and (since the checkpointer was deleted) approval
+    # request rows and action-result audit. A default compose dependency.
     POSTGRES_DSN: str = "postgresql://app:app@localhost:5432/app"

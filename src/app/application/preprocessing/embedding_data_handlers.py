@@ -1,7 +1,8 @@
 """Per-format embedding handlers — the EMBED stage.
 
 Each handler batches chunks through the ``EmbeddingProvider`` into
-``Embedded*Chunk`` entities. Batching follows the ``EMBEDDING_BATCH_SIZE``
+``EmbeddedChunk`` entities of the single ``chunks`` collection, tagging
+each with its ``format``. Batching follows the ``EMBEDDING_BATCH_SIZE``
 setting (one provider call per batch), chunks longer than the provider's
 input limit are split before they are handed over, and the provider's
 ``model_id`` is written into every chunk's metadata — part of the durable
@@ -14,13 +15,7 @@ from typing import ClassVar, Optional
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.domain.chunks import (
-    Chunk,
-    EmbeddedChunk,
-    EmbeddedDocxChunk,
-    EmbeddedPdfChunk,
-    EmbeddedTextChunk,
-)
+from app.domain.chunks import Chunk, EmbeddedChunk
 from app.domain.documents import CleanedDocument
 from app.domain.enums import DataCategory
 from app.infrastructure.embedding.base import EmbeddingProvider
@@ -34,7 +29,6 @@ class EmbeddingDataHandler(ABC):
     """Strategy: embed one format's chunks via the provider."""
 
     category: ClassVar[DataCategory]
-    embedded_chunk_class: ClassVar[type[EmbeddedChunk]]
 
     def __init__(self, embedding_provider: Optional[EmbeddingProvider] = None) -> None:
         self._provider = embedding_provider or get_embedding_model()
@@ -43,9 +37,10 @@ class EmbeddingDataHandler(ABC):
         self, *, data_model: CleanedDocument, chunks: list[Chunk]
     ) -> list[EmbeddedChunk]:
         """Embed ``chunks`` in ``EMBEDDING_BATCH_SIZE`` batches, producing
-        ``Embedded*Chunk`` entities with the model id in metadata. Batches
-        are awaited sequentially; the provider gathers its own API calls
-        under ``EMBEDDING_MAX_CONCURRENCY``."""
+        ``EmbeddedChunk`` entities with the model id in metadata and the
+        handler's format stamped on each point. Batches are awaited
+        sequentially; the provider gathers its own API calls under
+        ``EMBEDDING_MAX_CONCURRENCY``."""
         if not chunks:
             raise ValueError(
                 f"Document {data_model.document_id} has no chunks to embed."
@@ -75,11 +70,13 @@ class EmbeddingDataHandler(ABC):
         return embedded
 
     def _to_embedded_chunk(self, chunk: Chunk, vector: list[float]) -> EmbeddedChunk:
-        """Carry every chunk field into its embedded twin and stamp the
-        provider's model id into metadata (durable model record)."""
+        """Carry every chunk field into its storable twin, stamp the
+        provider's model id into metadata (durable model record) and the
+        handler's format into the point (one ``chunks`` collection; the
+        format is payload, not a collection)."""
         metadata = dict(chunk.metadata)
         metadata["embedding_model_id"] = self._provider.model_id
-        return self.embedded_chunk_class(
+        return EmbeddedChunk(
             id=chunk.id,
             tenant_id=chunk.tenant_id,
             document_id=chunk.document_id,
@@ -87,6 +84,7 @@ class EmbeddingDataHandler(ABC):
             created_at=chunk.created_at,
             metadata=metadata,
             embedding=list(vector),
+            format=self.category,
         )
 
     def _enforce_input_limit(self, chunks: list[Chunk]) -> list[Chunk]:
@@ -127,14 +125,11 @@ class EmbeddingDataHandler(ABC):
 
 class PdfEmbeddingHandler(EmbeddingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.PDF
-    embedded_chunk_class: ClassVar[type[EmbeddedChunk]] = EmbeddedPdfChunk
 
 
 class TextEmbeddingHandler(EmbeddingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.TEXT
-    embedded_chunk_class: ClassVar[type[EmbeddedChunk]] = EmbeddedTextChunk
 
 
 class DocxEmbeddingHandler(EmbeddingDataHandler):
     category: ClassVar[DataCategory] = DataCategory.DOCX
-    embedded_chunk_class: ClassVar[type[EmbeddedChunk]] = EmbeddedDocxChunk
