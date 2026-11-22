@@ -522,7 +522,7 @@ _The graph driven with fakes via the seam; scratch toy workflows returning scrip
 
 ## Task T10: Plan pause/resume + acceptance walkthroughs
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** critical

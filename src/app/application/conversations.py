@@ -1,4 +1,5 @@
-"""Conversation turn service — the heart of slice 1 (CR-R1..R4, CR-N1/N2/N4).
+"""Conversation turn service — the heart of slices 1 + 2 (CR-R1..R4,
+CR-N1/N2/N4, PE-R10/R12).
 
 Everything the graph must not touch lives here: turn serialization via
 turn-spanning Postgres advisory locks (A17), history assembly for the graph
@@ -9,6 +10,18 @@ seq bump + inserts commit together), and the approval-decision hook that
 appends completed outcomes to the linked conversation (A8, CR-R10 service
 half).
 
+The slice-2 half (T10) persists the orchestration artifacts (PE-R12): a
+multi-workflow turn appends the validated-plan snapshot (a ``plan``-kind
+message) and writes the mutable ``PlanRecord`` (status, steps, todos,
+pause linkage) beside the turn's transcript rows — and the approval-decision
+hook grew the resume branch: a decision on a paused plan's request re-seeds
+the graph's resume entry from the persisted ``PlanRecord`` (A9 — no
+checkpointer; the row survives redeploys), injects the decision outcome as
+the paused step's result (an approved action already executed inside
+``decide_approval`` — the step is never re-run), runs the remainder under
+the same turn machinery (advisory lock, one-tx append), and appends the
+final answer after any newer messages (append-order).
+
 Failure discipline (CR-N1): this module is the single catch point. Business
 outcomes are values; every infrastructure exception — pool down, persist
 failure, a graph crash — maps to ONE user-meaningful error
@@ -16,9 +29,9 @@ failure, a graph crash — maps to ONE user-meaningful error
 an exception from it is a bug, but even a bug surfaces as that single error,
 never a partial turn.
 
-Tenant isolation is structural (CR-R12/N3): every accessor call carries the
-tenant id, and the header check ``WHERE id AND tenant_id`` makes an unknown
-and a cross-tenant conversation id raise the byte-identical
+Tenant isolation is structural (CR-R12/N3, PE-N2): every accessor call
+carries the tenant id, and the header check ``WHERE id AND tenant_id``
+makes an unknown and a cross-tenant conversation id raise the byte-identical
 ``ConversationNotFoundError``. Record access goes through the T2 accessors'
 raising twins (``_get_conversation`` & co. — the ``runtime.py`` /
 ``ApprovalRecord._retrieve_by_ids`` precedent): a fetch that breaks raises
@@ -26,9 +39,9 @@ into the catch point, while a fetch that finds nothing returns ``None`` —
 which is exactly the no-oracle signal. The turn-spanning advisory lock is
 the one declared additive T2 accessor (``conversation_turn_lock``).
 
-Logs carry ids and statuses only — never message text, replies, or workflow
-payloads (CR-N4); ``turn_id`` (the envelope ``run_id``) is the correlation
-key.
+Logs carry ids and statuses only — never message text, replies, workflow
+payloads, or plan/todo content (CR-N4, PE-N4); ``turn_id`` (the envelope
+``run_id``) is the correlation key.
 """
 
 import logging
@@ -40,8 +53,14 @@ from uuid import UUID
 from langgraph.graph.state import CompiledStateGraph
 
 from app.domain import conversations as records
+from app.domain import plans
 from app.domain.conversations import MessageDraft
-from app.domain.enums import MessageKind, MessageRole, TurnOutcome
+from app.domain.enums import (
+    MessageKind,
+    MessageRole,
+    PlanStatus,
+    TurnOutcome,
+)
 from app.graphs.base.state import WorkflowResult, WorkflowStatus
 from app.graphs.orchestrator.catalog import build_catalog
 from app.graphs.orchestrator.graph import build_orchestrator_graph
@@ -186,6 +205,274 @@ def _outcome_summary_line(
     return "; ".join(parts) or f"{named} ran"
 
 
+# ---------------------------------------------------------------------------
+# Slice-2 helpers — plan artifacts + the mutable PlanRecord (T10, PE-R10/R12)
+# ---------------------------------------------------------------------------
+
+
+def _orchestrator_recursion_limit() -> int:
+    """The orchestrator's own superstep budget, derived from the configured
+    cycle bounds (the runtime-facade pattern — every cycle's real bound is
+    its state counter; this is only the global backstop)."""
+    settings = Settings()
+    return (
+        2 * settings.PLANNER_MAX_ATTEMPTS
+        + 2 * (settings.EXECUTOR_MAX_REINVOCATIONS + 1)
+        + 24
+    )
+
+
+def _plan_summary_line(plan_state: dict[str, Any]) -> str:
+    """The plan-outcome artifact's one-liner — per-step workflows and their
+    statuses (ids and statuses; the conversational reply carries the prose)."""
+    parts: list[str] = []
+    for step in plan_state.get("steps") or []:
+        part = f"{step['workflow']} {step['status']}"
+        if step["status"] == "pending" and plan_state.get("pending_request_id"):
+            part += f" (request {plan_state['pending_request_id']})"
+        parts.append(part)
+    return "; ".join(parts) or "plan ran"
+
+
+def _plan_steps_payload(plan_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """JSON-safe per-step outcome payload (PE-R12 — the artifact a later
+    turn or an auditor reads; outputs are the workflows' own)."""
+    return [
+        {
+            "step": step["number"],
+            "workflow": step["workflow"],
+            "status": step["status"],
+            "output": step.get("output"),
+        }
+        for step in plan_state.get("steps") or []
+    ]
+
+
+def _plan_snapshot_payload(plan_state: dict[str, Any]) -> dict[str, Any]:
+    """The immutable validated-plan snapshot (``plan``-kind message data):
+    intent only — numbers, workflows, declared inputs with their
+    ``$$STEP_X_OUTPUT$$`` tokens; what actually ran lives in the outcome
+    artifacts and the PlanRecord."""
+    return {
+        "steps": [
+            {
+                "step": step["number"],
+                "workflow": step["workflow"],
+                "input": step["input"],
+            }
+            for step in plan_state.get("steps") or []
+        ]
+    }
+
+
+async def _persist_plan_record(
+    tenant_id: str, conversation_id: UUID, plan_state: dict[str, Any]
+) -> Optional[UUID]:
+    """Write the turn's final plan state as the mutable ``PlanRecord``
+    (create → update: the T2 accessors' two-step path to a non-default
+    status/todos/pause linkage). Failures are logged — the transcript rows
+    are already the committed truth of this turn (A8-adjacent)."""
+    try:
+        record = await plans.create_plan(
+            tenant_id,
+            conversation_id,
+            [plans.PlanStep.model_validate(s) for s in plan_state["steps"]],
+        )
+        if record is None:
+            logger.warning(
+                "plan record not persisted (tenant=%s conversation=%s "
+                "create_failed=1)",
+                tenant_id,
+                conversation_id,
+            )
+            return None
+        record.status = PlanStatus(
+            plan_state.get("status") or PlanStatus.EXECUTING.value
+        )
+        record.steps = [plans.PlanStep.model_validate(s) for s in plan_state["steps"]]
+        record.todos = [plans.Todo.model_validate(t) for t in plan_state.get("todos") or []]
+        pending = plan_state.get("pending_request_id")
+        record.pending_request_id = UUID(str(pending)) if pending else None
+        updated = await plans.update_plan(record)
+        if updated is None:
+            logger.warning(
+                "plan record not finalized (tenant=%s plan_id=%s update_failed=1)",
+                tenant_id,
+                record.id,
+            )
+        logger.info(
+            "plan tenant=%s conversation=%s plan_id=%s status=%s steps=%d"
+            " todos=%d",
+            tenant_id,
+            conversation_id,
+            record.id,
+            record.status.value,
+            len(record.steps),
+            len(record.todos),
+        )
+        return record.id
+    except Exception:
+        logger.exception(
+            "plan record persistence crashed (tenant=%s conversation=%s)",
+            tenant_id,
+            conversation_id,
+        )
+        return None
+
+
+def _resolve_paused_step(
+    steps: list[dict[str, Any]],
+    todos: list[dict[str, Any]],
+    result: WorkflowResult,
+) -> None:
+    """Inject the human decision as the paused step's outcome (PE-R10 / PE
+    decision 8): the approved action already executed inside
+    ``decide_approval`` — the step is settled from its result, never re-run;
+    a rejection or a failed action counts as the step failing. The step's
+    todo closes to match (completed on success; abandoned with the
+    decision's reason otherwise)."""
+    paused = next((s for s in steps if s["status"] == "pending"), None)
+    if paused is None:
+        return
+    if result.status == WorkflowStatus.COMPLETED:
+        paused["status"] = "completed"
+        paused["output"] = result.output
+        reason = None
+    else:
+        paused["status"] = "failed"
+        reason = (
+            "approval rejected"
+            if result.status == WorkflowStatus.REJECTED
+            else f"workflow failed: {result.error or '(no detail)'}"
+        )
+    todo = next((t for t in todos if t["id"] == paused["number"]), None)
+    if todo is None or todo["status"] in ("completed", "abandoned"):
+        return
+    if reason is None:
+        todo["status"] = "completed"
+    else:
+        todo["status"] = "abandoned"
+        todo["abandon_reason"] = reason
+
+
+async def _resume_paused_plan(
+    tenant_id: str,
+    request: UUID,
+    record: "plans.PlanRecord",
+    result: WorkflowResult,
+) -> None:
+    """The PE-R10 resume: re-seed the graph's resume entry from the paused
+    ``PlanRecord`` (A9 — Postgres is the state, no checkpointer), run the
+    remainder under the same turn machinery, append the final answer
+    (append-order — after any newer messages), and finalize the record.
+    Failures are logged and swallowed (A8): the decision + action records
+    are already the durable truth."""
+    try:
+        async with records.conversation_turn_lock(record.conversation_id):
+            # Lock → re-check → act (the runtime's decide_approval twin):
+            # a second decision, or a resume already in flight, reads here.
+            fresh = await plans.get_plan(tenant_id, record.id)
+            if fresh is None or fresh.status != PlanStatus.PAUSED:
+                logger.info(
+                    "approval_outcome tenant=%s request_id=%s conversation=%s"
+                    " appended=no (plan not paused)",
+                    tenant_id,
+                    request,
+                    record.conversation_id,
+                )
+                return
+            linked = await records._find_message_by_pending_request(
+                tenant_id, request
+            )
+            transcript = await records._get_transcript(
+                tenant_id, fresh.conversation_id
+            )
+            goal = ""
+            if linked is not None:
+                prior = [
+                    row
+                    for row in transcript
+                    if row.role == MessageRole.USER and row.seq < linked.seq
+                ]
+                goal = prior[-1].content if prior else ""
+            steps = [step.model_dump() for step in fresh.steps]
+            todos = [todo.model_dump() for todo in fresh.todos]
+            _resolve_paused_step(steps, todos, result)
+            seed = {
+                "message": goal,
+                "status": PlanStatus.EXECUTING.value,
+                "steps": steps,
+                "todos": todos,
+                "pending_request_id": None,
+                "reinvocations": 0,
+                "takeover": False,
+            }
+            resume_id = str(uuid.uuid4())
+            final = await _get_orchestrator_graph().ainvoke(
+                {
+                    "tenant_id": tenant_id,
+                    "run_id": resume_id,
+                    "errors": [],
+                    "plan": seed,
+                },
+                config={"recursion_limit": _orchestrator_recursion_limit()},
+            )
+            reply = str(final.get("reply") or "")
+            runs: list[WorkflowResult] = list(final.get("runs") or [])
+            final_plan = final.get("plan") or seed
+            pending = final_plan.get("pending_request_id")
+            drafts = [
+                MessageDraft(
+                    role=MessageRole.ASSISTANT,
+                    kind=MessageKind.WORKFLOW_OUTCOME,
+                    content=_plan_summary_line(final_plan),
+                    data={
+                        "outcome": TurnOutcome.MULTI_WORKFLOW.value,
+                        "runs": _plan_steps_payload(final_plan),
+                    },
+                ),
+                MessageDraft(
+                    role=MessageRole.ASSISTANT,
+                    kind=MessageKind.TEXT,
+                    content=reply,
+                    data={"outcome": TurnOutcome.MULTI_WORKFLOW.value},
+                    pending_request_id=UUID(str(pending)) if pending else None,
+                ),
+            ]
+            appended = await records._append_messages(
+                tenant_id, fresh.conversation_id, drafts
+            )
+            fresh.status = PlanStatus(
+                final_plan.get("status") or PlanStatus.DONE.value
+            )
+            fresh.steps = [
+                plans.PlanStep.model_validate(s)
+                for s in final_plan.get("steps") or steps
+            ]
+            fresh.todos = [
+                plans.Todo.model_validate(t)
+                for t in final_plan.get("todos") or todos
+            ]
+            fresh.pending_request_id = UUID(str(pending)) if pending else None
+            await plans.update_plan(fresh)
+            logger.info(
+                "approval_outcome tenant=%s request_id=%s conversation=%s"
+                " appended=%s plan_status=%s",
+                tenant_id,
+                request,
+                fresh.conversation_id,
+                appended is not None,
+                fresh.status.value,
+            )
+    except Exception:
+        # A8: isolated — never change the decision response.
+        logger.exception(
+            "plan resume failed (tenant=%s request_id=%s)",
+            tenant_id,
+            request,
+        )
+
+
 async def _run_turn(
     tenant_id: str, conversation_id: UUID, message: str
 ) -> ConversationTurnResult:
@@ -213,13 +500,19 @@ async def _run_turn(
                     "history": assemble_history(transcript),
                     "catalog": build_catalog(),
                     "must_commit": compute_must_commit(transcript),
-                }
+                },
+                config={"recursion_limit": _orchestrator_recursion_limit()},
             )
             reply = str(final.get("reply") or "")
             outcome = TurnOutcome(final.get("outcome") or TurnOutcome.DIRECT)
             runs: list[WorkflowResult] = list(final.get("runs") or [])
             workflow = (final.get("classification") or {}).get("workflow")
             pending_request_id = final.get("pending_request_id")
+            plan_state = final.get("plan") or None
+            slice2 = bool(
+                plan_state and plan_state.get("steps")
+                and outcome == TurnOutcome.MULTI_WORKFLOW
+            )
 
             drafts = [
                 MessageDraft(
@@ -237,7 +530,33 @@ async def _run_turn(
                     ),
                 ),
             ]
-            if runs:
+            if slice2:
+                # PE-R12 artifacts: the immutable validated-plan snapshot,
+                # then the per-step outcome line (the plan is the intent,
+                # the steps are what actually happened).
+                drafts.append(
+                    MessageDraft(
+                        role=MessageRole.ASSISTANT,
+                        kind=MessageKind.PLAN,
+                        content=_plan_summary_line(plan_state),
+                        data={
+                            "outcome": outcome.value,
+                            "plan": _plan_snapshot_payload(plan_state),
+                        },
+                    )
+                )
+                drafts.append(
+                    MessageDraft(
+                        role=MessageRole.ASSISTANT,
+                        kind=MessageKind.WORKFLOW_OUTCOME,
+                        content=_plan_summary_line(plan_state),
+                        data={
+                            "outcome": outcome.value,
+                            "runs": _plan_steps_payload(plan_state),
+                        },
+                    )
+                )
+            elif runs:
                 drafts.append(
                     MessageDraft(
                         role=MessageRole.ASSISTANT,
@@ -252,7 +571,11 @@ async def _run_turn(
             rows = await records._append_messages(
                 tenant_id, conversation_id, drafts
             )
-            assistant_row = rows[1]  # [user, assistant(, outcome)]
+            assistant_row = rows[1]  # [user, assistant(, plan, outcome)]
+            if slice2:
+                await _persist_plan_record(
+                    tenant_id, conversation_id, plan_state
+                )
     except (ConversationNotFoundError, InvalidMessageError):
         raise
     except Exception as error:
@@ -345,10 +668,14 @@ async def get_transcript(
 async def on_approval_decided(
     tenant_id: str, request_id: Union[str, UUID], result: WorkflowResult
 ) -> None:
-    """The CR-R10 decision hook (slice-1 branch): append the completed
-    outcome to the conversation whose assistant reply carries this
-    ``pending_request_id`` — append-order, i.e. after any messages the user
-    sent while waiting.
+    """The decision hook — both slices (CR-R10 / PE-R10).
+
+    Slice 2 first: a paused ``PlanRecord`` linked to this request is resumed
+    — the remainder runs from the paused step and the final answer is
+    appended (append-order). Otherwise the slice-1 branch: append the
+    completed outcome to the conversation whose assistant reply carries
+    this ``pending_request_id`` — after any messages the user sent while
+    waiting.
 
     Failures are logged and swallowed, never raised: the decision response
     is already committed truth, and the approval + action records remain the
@@ -367,6 +694,10 @@ async def on_approval_decided(
         )
         return
     try:
+        paused_plan = await plans.get_plan_by_pending_request(tenant_id, request)
+        if paused_plan is not None:
+            await _resume_paused_plan(tenant_id, request, paused_plan, result)
+            return
         linked = await records._find_message_by_pending_request(
             tenant_id, request
         )
