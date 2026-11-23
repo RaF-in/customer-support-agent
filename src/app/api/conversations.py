@@ -20,7 +20,7 @@ from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Path
+from fastapi import APIRouter, Header, HTTPException, Path
 from pydantic import BaseModel, field_validator
 
 from app.application.conversations import (
@@ -103,12 +103,21 @@ def _map_turn_errors(error: Exception) -> None:
 
 @router.post("/conversations", status_code=201, response_model=TurnResponse)
 async def start(
-    body: MessageBody, tenant_id: str = Path(min_length=1)
+    body: MessageBody,
+    tenant_id: str = Path(min_length=1),
+    user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
 ) -> TurnResponse:
     """Start a conversation: the header is created implicitly by this first
-    message and the new conversation id rides the 201 (CR-R2)."""
+    message and the new conversation id rides the 201 (CR-R2).
+
+    The optional ``X-User-Id`` header binds the conversation's owner once,
+    at creation (LM A2/A3): caller-asserted identity in MVP — stripped of
+    surrounding whitespace, ignored when blank, never per-message (the
+    messages endpoint ignores user headers; the bound owner wins).
+    """
+    cleaned_user = (user_id or "").strip() or None
     try:
-        result = await start_conversation(tenant_id, body.message)
+        result = await start_conversation(tenant_id, body.message, cleaned_user)
     except (InvalidMessageError, ConversationNotFoundError,
             ConversationUnavailableError) as error:
         _map_turn_errors(error)

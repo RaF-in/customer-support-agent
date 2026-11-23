@@ -81,7 +81,7 @@ _Direct accessor calls from a scratch async script against `docker compose --pro
 
 ## Task T2: Identity + Read Path — Header Binding, Card Seeding, Memory Prompt Blocks
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** m
 > **Priority:** high

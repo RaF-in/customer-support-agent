@@ -21,7 +21,7 @@ history, and catalog.
 """
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import ValidationError
@@ -60,6 +60,20 @@ def _history_text(history: list[dict[str, Any]]) -> str:
         for entry in history
     ]
     return "\n".join(lines)
+
+
+# The long-term-memory block (LM v1): the owner's fact card, service-seeded.
+# Facts are customer data rendered inside a labeled block — the same trust
+# treatment as transcript text, never instructions (LM ARCH security note).
+_MEMORY_BLOCK_HEADER = "What you already know about this customer:"
+
+
+def _memory_text(memories: Optional[list[str]]) -> str:
+    """Render the memory block's body — absence reads neutrally, byte-identical
+    for an empty card, a missing key, and an anonymous turn (LM-R5/R7)."""
+    if not memories:
+        return "(nothing known yet)"
+    return "\n".join(f"- {fact}" for fact in memories)
 
 
 def semantic_validation_errors(decision: RouterDecision) -> list[str]:
@@ -108,18 +122,24 @@ async def _ask(messages: list[Any]) -> RouterDecision:
 
 
 async def classify(
-    message: str, history: list[dict[str, Any]], catalog: str
+    message: str,
+    history: list[dict[str, Any]],
+    catalog: str,
+    memories: Optional[list[str]] = None,
 ) -> tuple[RouterDecision, int]:
     """Classify one turn — returns ``(decision, attempts)``.
 
     ``attempts`` never exceeds 2 (one retry). The returned decision is
     always in contract: either a validated classification or the direct
-    fallback. Never raises.
+    fallback. Never raises. ``memories`` is the service-seeded fact card
+    (LM v1): durable knowledge about the customer that crosses
+    conversations, rendered as its own labeled block.
     """
     base_messages = [
         SystemMessage(_SYSTEM_PROMPT.format(catalog=catalog)),
         HumanMessage(
             f"Conversation so far:\n{_history_text(history)}\n\n"
+            f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
             f"User message: {message}"
         ),
     ]
@@ -150,7 +170,10 @@ async def route(state: OrchestratorState) -> dict[str, Any]:
     """Graph node: classify the turn and store the decision (JSON-safe)."""
     catalog = state.get("catalog") or build_catalog()
     decision, attempts = await classify(
-        state["message"], state.get("history") or [], catalog
+        state["message"],
+        state.get("history") or [],
+        catalog,
+        memories=state.get("memories"),
     )
     logger.info(
         "route tenant=%s turn_id=%s outcome=%s workflow=%s attempt=%d",

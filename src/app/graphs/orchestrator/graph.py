@@ -95,6 +95,7 @@ async def planner_node(state: OrchestratorState) -> dict[str, Any]:
         state.get("history") or [],
         state.get("catalog") or build_catalog(),
         feedback=plan.get("errors") or None,
+        memories=state.get("memories"),
     )
     return {"plan": plan}
 
@@ -119,7 +120,9 @@ async def validate_node(state: OrchestratorState) -> dict[str, Any]:
                 False,
             )
             reply = await exhaustion_reply(
-                state["message"], state.get("history") or []
+                state["message"],
+                state.get("history") or [],
+                memories=state.get("memories"),
             )
             return {
                 "plan": plan,

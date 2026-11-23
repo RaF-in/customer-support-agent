@@ -109,6 +109,20 @@ def _history_text(history: Optional[list[dict[str, Any]]]) -> str:
     )
 
 
+# The long-term-memory block (LM v1), same shape as the router's: the
+# owner's fact card, service-seeded, rendered inside a labeled data block —
+# customer data, never instructions. Absence reads neutrally everywhere.
+_MEMORY_BLOCK_HEADER = "What you already know about this customer:"
+
+
+def _memory_text(memories: Optional[list[str]]) -> str:
+    """Render the memory block's body — absence is byte-identical for an
+    empty card, a missing key, and an anonymous turn (LM-R5/R7)."""
+    if not memories:
+        return "(nothing known yet)"
+    return "\n".join(f"- {fact}" for fact in memories)
+
+
 def _placeholder_refs(value: Any) -> set[int]:
     """Every step number referenced by ``$$STEP_X_OUTPUT$$`` tokens in a
     (possibly nested) input value."""
@@ -204,12 +218,14 @@ async def generate_plan_text(
     history: Optional[list[dict[str, Any]]] = None,
     catalog: Optional[str] = None,
     feedback: Optional[list[str]] = None,
+    memories: Optional[list[str]] = None,
 ) -> str:
     """One planner-LLM attempt: the emitted plan text (unparsed — the
     validator owns parsing, so malformed output stays a handled class).
 
     ``feedback`` carries the previous attempt's validation errors (PE-R4's
-    correction loop).
+    correction loop); ``memories`` is the service-seeded fact card (LM v1) —
+    durable customer facts that shape workflow choice and inputs.
     """
     catalog = catalog or build_catalog()
     messages: list[Any] = [
@@ -220,6 +236,7 @@ async def generate_plan_text(
         ),
         HumanMessage(
             f"Conversation so far:\n{_history_text(history)}\n\n"
+            f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
             f"User's compound goal: {message}"
         ),
     ]
@@ -280,11 +297,14 @@ async def build_plan(
 
 
 async def exhaustion_reply(
-    message: str, history: Optional[list[dict[str, Any]]] = None
+    message: str,
+    history: Optional[list[dict[str, Any]]] = None,
+    memories: Optional[list[str]] = None,
 ) -> str:
     """The apologetic direct answer on plan exhaustion (PE-R4) — one
     ``generator`` call with a static fallback, paths.py style; nothing was
-    executed and the conversation continues."""
+    executed and the conversation continues. ``memories`` is the
+    service-seeded fact card (LM v1)."""
     model = get_chat_model("generator")
     try:
         response = await model.ainvoke(
@@ -292,6 +312,7 @@ async def exhaustion_reply(
                 SystemMessage(_EXHAUSTION_SYSTEM),
                 HumanMessage(
                     f"Conversation so far:\n{_history_text(history)}\n\n"
+                    f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
                     f"Customer's request that could not be planned: {message}\n"
                     "Write the apology."
                 ),

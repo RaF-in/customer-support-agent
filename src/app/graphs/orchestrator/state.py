@@ -37,6 +37,12 @@ class OrchestratorState(WorkflowState, total=False):
     history: list[dict[str, Any]]  # prior transcript entries, chronological
     catalog: str  # deterministic menu text (catalog.build_catalog())
     must_commit: bool  # clarify cap reached — the T4 conditional edge forces a commit
+    # Long-term memory (LM v1): the owner's active fact-card contents in
+    # recency order, plain strings — the graph learns memory exactly the way
+    # it learns history, as a service-seeded key (graphs import nothing new).
+    # Seeded only when non-empty; absence (anonymous turn, empty card, or the
+    # resume path) must render neutrally in every consuming prompt (LM-R5/R7).
+    memories: list[str]
     # route node output — RouterDecision.model_dump()
     classification: dict[str, Any]
     # reply-path output (T4)

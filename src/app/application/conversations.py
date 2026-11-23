@@ -53,6 +53,7 @@ from uuid import UUID
 from langgraph.graph.state import CompiledStateGraph
 
 from app.domain import conversations as records
+from app.domain import memories
 from app.domain import plans
 from app.domain.conversations import MessageDraft
 from app.domain.enums import (
@@ -477,9 +478,9 @@ async def _run_turn(
     tenant_id: str, conversation_id: UUID, message: str
 ) -> ConversationTurnResult:
     """One serialized turn under the advisory lock: header check (no oracle)
-    → transcript → history/streak seeding → graph → ONE-transaction persist.
-    Any exception outside the business errors maps to the single
-    user-meaningful error (CR-N1)."""
+    → transcript → card fetch → history/streak/memories seeding → graph →
+    ONE-transaction persist. Any exception outside the business errors maps
+    to the single user-meaningful error (CR-N1)."""
     turn_id = str(uuid.uuid4())
     started = time.perf_counter()
     try:
@@ -491,16 +492,44 @@ async def _run_turn(
             # legitimately means an empty transcript (first turn).
             transcript = await records._get_transcript(tenant_id, conversation_id)
 
+            # Long-term memory read half (LM v1): fetch the bound owner's
+            # card once and seed it as the optional ``memories`` state key —
+            # the graph learns memory the way it learns history. Fetched
+            # only when an owner is bound AND the lever is on; seeded only
+            # when non-empty, so anonymous turns invoke the graph with
+            # exactly today's state (LM-R5/R7 — memory is enhancement,
+            # never critical path: a broken fetch degrades to [] with one
+            # warning and the turn proceeds).
+            card: list["memories.MemoryFact"] = []
+            if header.user_id and Settings().MEMORY_ENABLED:
+                try:
+                    card = await memories.list_active_facts(
+                        tenant_id,
+                        header.user_id,
+                        Settings().MEMORY_MAX_FACTS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "memory card fetch degraded to empty (tenant=%s"
+                        " conversation=%s)",
+                        tenant_id,
+                        conversation_id,
+                    )
+                    card = []
+            seed: dict[str, Any] = {
+                "tenant_id": tenant_id,
+                "run_id": turn_id,
+                "errors": [],
+                "message": message,
+                "history": assemble_history(transcript),
+                "catalog": build_catalog(),
+                "must_commit": compute_must_commit(transcript),
+            }
+            if card:
+                seed["memories"] = [fact.content for fact in card]
+
             final = await _get_orchestrator_graph().ainvoke(
-                {
-                    "tenant_id": tenant_id,
-                    "run_id": turn_id,
-                    "errors": [],
-                    "message": message,
-                    "history": assemble_history(transcript),
-                    "catalog": build_catalog(),
-                    "must_commit": compute_must_commit(transcript),
-                },
+                seed,
                 config={"recursion_limit": _orchestrator_recursion_limit()},
             )
             reply = str(final.get("reply") or "")
@@ -610,16 +639,20 @@ async def _run_turn(
 
 
 async def start_conversation(
-    tenant_id: str, message: str
+    tenant_id: str, message: str, user_id: Optional[str] = None
 ) -> ConversationTurnResult:
     """Create the header implicitly (CR decision 5) and run the first turn.
+
+    ``user_id`` binds the conversation's long-term-memory owner once, at
+    creation (LM A2 — the X-User-Id header threaded from the API; None =
+    anonymous, behavior identical to today, LM-R7).
 
     422-equivalent (``InvalidMessageError``) before anything is stored;
     infrastructure failures raise the single user-meaningful error.
     """
     _validate_message(message)
     try:
-        header = await records._create_conversation(tenant_id)
+        header = await records._create_conversation(tenant_id, user_id)
     except Exception as error:
         logger.exception(
             "conversation creation failed (tenant=%s)", tenant_id

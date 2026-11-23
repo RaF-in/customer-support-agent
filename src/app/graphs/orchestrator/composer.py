@@ -71,10 +71,30 @@ def _rejected_template(workflow: Optional[str]) -> str:
     )
 
 
+# The long-term-memory block (LM v1), same shape as the router's/planner's:
+# the owner's fact card, service-seeded, rendered inside a labeled data
+# block — customer data, never instructions. Absence reads neutrally.
+_MEMORY_BLOCK_HEADER = "What you already know about this customer:"
+
+
+def _memory_text(memories: Optional[list[str]]) -> str:
+    """Render the memory block's body — absence is byte-identical for an
+    empty card, a missing key, and an anonymous turn (LM-R5/R7)."""
+    if not memories:
+        return "(nothing known yet)"
+    return "\n".join(f"- {fact}" for fact in memories)
+
+
 async def _generate(
-    system: str, user: str, fallback: str, history: list[dict[str, Any]]
+    system: str,
+    user: str,
+    fallback: str,
+    history: list[dict[str, Any]],
+    memories: Optional[list[str]] = None,
 ) -> str:
-    """One generator call with a static fallback (never raises)."""
+    """One generator call with a static fallback (never raises).
+    ``memories`` is the service-seeded fact card (LM v1) — one touch here
+    covers both ``compose_reply`` and ``compose_final``."""
     model = get_chat_model("generator")
     history_text = "\n".join(
         f"[{entry.get('role', '?')}] {entry.get('content', '')}"
@@ -84,7 +104,11 @@ async def _generate(
         message = await model.ainvoke(
             [
                 SystemMessage(system),
-                HumanMessage(f"Conversation so far:\n{history_text}\n\n{user}"),
+                HumanMessage(
+                    f"Conversation so far:\n{history_text}\n\n"
+                    f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
+                    f"{user}"
+                ),
             ]
         )
         return (
@@ -114,6 +138,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
     classification = state.get("classification") or {}
     workflow = classification.get("workflow")
     history = state.get("history") or []
+    memories = state.get("memories")
 
     if result.status == WorkflowStatus.PENDING_APPROVAL:
         return {
@@ -127,6 +152,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
             f"{result.error or '(no detail)'}. Write the apology.",
             _STATIC_APOLOGY_FALLBACK,
             history,
+            memories=memories,
         )
         return {"reply": reply}
     if result.status == WorkflowStatus.REJECTED:
@@ -140,6 +166,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
         "Write the reply.",
         _STATIC_COMPOSED_FALLBACK,
         history,
+        memories=memories,
     )
     return {"reply": reply}
 
@@ -205,6 +232,7 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
     steps: list[dict[str, Any]] = plan.get("steps") or []
     takeover = bool(plan.get("takeover"))
     history = state.get("history") or []
+    memories = state.get("memories")
     goal = plan.get("message") or state.get("message") or ""
 
     if takeover:
@@ -217,7 +245,8 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
             "Write the honest partial report."
         )
         reply = await _generate(
-            _TAKEOVER_SYSTEM, user, _STATIC_TAKEOVER_FALLBACK, history
+            _TAKEOVER_SYSTEM, user, _STATIC_TAKEOVER_FALLBACK, history,
+            memories=memories,
         )
     else:
         user = (
@@ -226,7 +255,8 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
             "Write the single final answer."
         )
         reply = await _generate(
-            _FINAL_SYSTEM, user, _STATIC_FINAL_FALLBACK, history
+            _FINAL_SYSTEM, user, _STATIC_FINAL_FALLBACK, history,
+            memories=memories,
         )
 
     # PE-R11, enforced: the last produced output is never the reply
