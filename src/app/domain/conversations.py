@@ -48,6 +48,10 @@ class ConversationRecord(BaseModel):
 
     id: UUID = Field(default_factory=uuid4)
     tenant_id: str
+    # The long-term-memory owner, bound once at creation from the
+    # X-User-Id header (LM A2). NULL = anonymous — no fact card, behavior
+    # identical to today; pre-existing rows stay NULL forever (no backfill).
+    user_id: Optional[str] = None
     last_seq: int = 0
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
@@ -85,10 +89,12 @@ class ConversationMessageRecord(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def create_conversation(tenant_id: str) -> Optional[ConversationRecord]:
+async def create_conversation(
+    tenant_id: str, user_id: Optional[str] = None
+) -> Optional[ConversationRecord]:
     """Insert a conversation header; returns None on failure."""
     try:
-        return await _create_conversation(tenant_id)
+        return await _create_conversation(tenant_id, user_id)
     except Exception:
         logger.exception("create_conversation failed for tenant %s", tenant_id)
         return None
@@ -188,11 +194,14 @@ _MESSAGE_COLUMNS = (
 )
 
 
-async def _create_conversation(tenant_id: str) -> ConversationRecord:
+async def _create_conversation(
+    tenant_id: str, user_id: Optional[str] = None
+) -> ConversationRecord:
     async with get_postgres_pool().connection() as conn:
         cursor = await conn.execute(
-            "INSERT INTO conversations (tenant_id) VALUES (%s) RETURNING *",
-            (tenant_id,),
+            "INSERT INTO conversations (tenant_id, user_id) "
+            "VALUES (%s, %s) RETURNING *",
+            (tenant_id, user_id),
         )
         row = await cursor.fetchone()
     assert row is not None

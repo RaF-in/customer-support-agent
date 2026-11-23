@@ -147,6 +147,32 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS action_results_approval_idx
         ON action_results (tenant_id, approval_id)
     """,
+    # Long-term memory v1 (LM ARCH): the per-user fact card. All additive
+    # (A18) — the ALTER leaves pre-existing conversations with NULL
+    # ``user_id`` (anonymous forever, by design; no backfill), and the
+    # card index serves the turn-start recency read directly.
+    """
+    ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id TEXT
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_facts (
+        id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        tenant_id              TEXT NOT NULL,
+        user_id                TEXT NOT NULL,
+        content                TEXT NOT NULL,
+        status                 TEXT NOT NULL DEFAULT 'active',
+        source_conversation_id UUID,
+        superseded_by          UUID,
+        created_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    # The card read path: (tenant, user) active facts by recency —
+    # index-bounded at any table size (LM-N3).
+    """
+    CREATE INDEX IF NOT EXISTS memory_facts_card_idx
+        ON memory_facts (tenant_id, user_id, status, updated_at DESC)
+    """,
 )
 
 

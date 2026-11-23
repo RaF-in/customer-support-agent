@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     PLAN_MAX_STEPS: int = Field(default=8, ge=1)
     POSTGRES_POOL_MAX_SIZE: int = Field(default=10, ge=1)
 
+    # Long-term memory (LM ARCH A9): the master switch — the one-env-change
+    # rollback lever, off stops both the turn-start card read and the
+    # post-turn extraction — and the card cap (the prompt-budget knob; the
+    # card is pure recency in v1, so the cap is also the retention bound).
+    MEMORY_ENABLED: bool = True
+    MEMORY_MAX_FACTS: int = Field(default=50, ge=1)
+
     # MCP tool servers (JSON, langchain-mcp-adapters client format) and the
     # per-tenant tool allowlist (JSON: tenant -> [tool names]). Deny-by-
     # default: a tenant absent from the allowlist gets NO tools.
