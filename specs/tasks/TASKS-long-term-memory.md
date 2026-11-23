@@ -152,7 +152,7 @@ _Fake chat models injected at the seam for every LLM touch (`router`/`planner`/`
 
 ## Task T3: Write Path — Post-Turn Extraction Under the Per-User Lock
 
-> **Status:** not started
+> **Status:** done
 > **Verification:** checklist
 > **Effort:** l
 > **Priority:** critical

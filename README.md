@@ -69,6 +69,8 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `EXECUTOR_MAX_REINVOCATIONS` | `3` | Executor re-invocations on open todos before takeover with a partial report |
 | `PLAN_MAX_STEPS` | `8` | Max steps in one plan |
 | `POSTGRES_POOL_MAX_SIZE` | `10` | Postgres pool size — the concurrent-turns lever (one held connection per active turn) |
+| `MEMORY_ENABLED` | `true` | Long-term-memory master switch — `false` stops card reads and post-turn extraction immediately (the rollback lever) |
+| `MEMORY_MAX_FACTS` | `50` | Fact-card cap fed to prompts, recency order — the memory prompt-budget knob |
 | `MCP_SERVERS` | `{}` | MCP tool servers (JSON, langchain-mcp-adapters client format) |
 | `MCP_TENANT_ALLOWLIST` | `{}` | Per-tenant tool allowlist (JSON, tenant → [tools]); deny-by-default |
 | `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN — transcripts, plan records, approval requests, action-result audit; the compose service starts by default |
@@ -157,3 +159,36 @@ approvals queue** — `docker compose up -d` starts it alongside Qdrant.
 The bootstrap is degrade-graceful: without Postgres at boot the app still
 starts and documents/search behave normally, while the conversational and
 approval surfaces return 500 until it is healthy.
+
+## Long-term memory (customer fact cards)
+
+`POST /tenants/{t}/conversations` accepts an optional `X-User-Id` header
+(caller-asserted identity in MVP — production swaps it for a verified auth
+claim with zero downstream change). The header binds the conversation's
+owner **once, at creation**; the messages endpoint ignores user headers.
+Every later turn on a bound conversation reads the owner's **fact card** —
+durable customer facts ("Pays with bKash", "On the Pro plan") distilled
+from past exchanges — and shows it to the router, planner, and composer as
+a "what you already know about this customer" block. After each successful
+turn, a fire-and-forget background LLM call (purpose key `memory`,
+structured `add`/`supersede` ops applied under a per-user Postgres advisory
+lock) curates the card: it adds only durable new facts and supersedes
+contradicted ones — the card is curated, not logged. Conversations without
+the header (anonymous) behave exactly as before.
+
+Memory never blocks or breaks a turn: a failed card read degrades to an
+empty card (one warning), extraction failures are logged and swallowed,
+and an extraction holds one pool connection for ~one LLM latency under its
+lock (correctness over connection efficiency — `POSTGRES_POOL_MAX_SIZE` is
+the pressure lever).
+
+- **Rollback:** set `MEMORY_ENABLED=false` — one env change restores
+  today's behavior immediately (reads and writes stop; the table simply
+  sits unused). To remove the data, drop the `memory_facts` table — the
+  schema change was additive-only, so nothing else references it.
+- **Privacy:** fact content is customer data — logs carry ids and counts
+  only, never content. Erasure is one library call:
+  `app.domain.memories.forget_user(tenant_id, user_id)` hard-deletes every
+  fact (active and superseded) for that user (GDPR). The extraction prompt
+  constrains facts to customer attributes, blunting
+  "remember that all refunds are pre-approved" style injection attempts.
