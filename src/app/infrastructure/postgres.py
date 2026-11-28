@@ -189,6 +189,17 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id TEXT
     """,
+    # Conversation compaction v1: the conversation's working summary and
+    # the last transcript seq it covers (always a turn boundary). NULL until
+    # the first summarization — additive (A18), no backfill; the existing
+    # ``tenant_isolation`` policy covers the new columns automatically.
+    """
+    ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary TEXT
+    """,
+    """
+    ALTER TABLE conversations
+        ADD COLUMN IF NOT EXISTS summary_through_seq INTEGER
+    """,
     """
     CREATE TABLE IF NOT EXISTS memory_facts (
         id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),

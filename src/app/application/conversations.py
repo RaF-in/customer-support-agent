@@ -3,7 +3,10 @@ CR-N1/N2/N4, PE-R10/R12).
 
 Everything the graph must not touch lives here: turn serialization via
 turn-spanning Postgres advisory locks (A17), history assembly for the graph
-(full transcript by default, lever-capped, A14), the consecutive-clarify
+(``application/compaction.py`` renders the transcript — exact action
+ledger, optional summary, recent turns verbatim — into ONE token-bounded
+``history_text`` string; the graph only embeds it, conversation-compaction
+A2), the consecutive-clarify
 streak that computes ``must_commit`` (A7's input), one-ACID-transaction
 transcript persistence (A3 — reply computed before anything is stored, then
 seq bump + inserts commit together), and the approval-decision hook that
@@ -68,6 +71,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph.state import CompiledStateGraph
 from pydantic import BaseModel, Field
 
+from app.application.compaction import HistoryView, build_history
 from app.domain import conversations as records
 from app.domain import memories
 from app.domain import plans
@@ -157,23 +161,15 @@ def _coerce_conversation_id(conversation_id: Union[str, UUID]) -> UUID:
 
 def assemble_history(
     transcript: list["records.ConversationMessageRecord"],
-) -> list[dict[str, Any]]:
-    """Render the transcript as the graph's ``history`` (chronological; every
-    transcript-visible entry included — outcomes are context too, CR-R3),
-    capped to the last ``CONVERSATION_HISTORY_MAX_MESSAGES`` entries when the
-    lever is set (0 = unlimited, A14)."""
-    history = [
-        {
-            "role": row.role.value,
-            "kind": row.kind.value,
-            "content": row.content,
-        }
-        for row in transcript
-    ]
-    limit = Settings().CONVERSATION_HISTORY_MAX_MESSAGES
-    if limit > 0:
-        history = history[-limit:]
-    return history
+    header: "records.ConversationRecord",
+) -> str:
+    """The one history string every prompt embeds (conversation-compaction
+    A2): ``build_history`` over the transcript and the header's two summary
+    columns. A turn builds the view itself (``_run_turn``) so it can log the
+    counts; this is the same call for anyone who needs only the text."""
+    return build_history(
+        transcript, header.summary, header.summary_through_seq
+    ).text
 
 
 def compute_must_commit(
@@ -447,6 +443,12 @@ async def _resume_paused_plan(
                     content=_plan_summary_line(final_plan),
                     data={
                         "outcome": TurnOutcome.MULTI_WORKFLOW.value,
+                        # Conversation-compaction ledger joins: the pause this
+                        # row resumes (which plan the steps belong to), and
+                        # the new gated step's request when the remainder
+                        # pauses again.
+                        "resumed_request_id": str(request),
+                        "pending_request_id": str(pending) if pending else None,
                         "runs": _plan_steps_payload(final_plan),
                     },
                 ),
@@ -673,6 +675,7 @@ async def _run_turn(
     to the single user-meaningful error (CR-N1)."""
     turn_id = str(uuid.uuid4())
     started = time.perf_counter()
+    view: HistoryView
     try:
         async with records.conversation_turn_lock(conversation_id):
             header = await records._get_conversation(tenant_id, conversation_id)
@@ -681,6 +684,14 @@ async def _run_turn(
             # Raising twin: infra failures raise (caught below); no rows
             # legitimately means an empty transcript (first turn).
             transcript = await records._get_transcript(tenant_id, conversation_id)
+
+            # History is rendered ONCE, here (conversation-compaction A2): an
+            # exact action ledger + the stored summary + the recent turns
+            # verbatim, bounded in tokens. No model call, no extra query; the
+            # view's counts ride the turn log line.
+            view = build_history(
+                transcript, header.summary, header.summary_through_seq
+            )
 
             # Long-term memory read half (LM v1): fetch the bound owner's
             # card once and seed it as the optional ``memories`` state key —
@@ -711,7 +722,7 @@ async def _run_turn(
                 "run_id": turn_id,
                 "errors": [],
                 "message": message,
-                "history": assemble_history(transcript),
+                "history_text": view.text,
                 "catalog": build_catalog(),
                 "must_commit": compute_must_commit(transcript),
             }
@@ -771,6 +782,12 @@ async def _run_turn(
                         content=_plan_summary_line(plan_state),
                         data={
                             "outcome": outcome.value,
+                            # The gated step's request when the turn paused
+                            # (conversation-compaction): the ledger reads it
+                            # to tell "pending approval" from "not run".
+                            "pending_request_id": (
+                                str(pending_request_id) if pending_request_id else None
+                            ),
                             "runs": _plan_steps_payload(plan_state),
                         },
                     )
@@ -783,6 +800,12 @@ async def _run_turn(
                         content=_outcome_summary_line(workflow, runs),
                         data={
                             "outcome": outcome.value,
+                            # The router's validated input (CP-R8): what the
+                            # ledger copies, so an executed action's inputs
+                            # are on the record beside its result.
+                            "input": (final.get("classification") or {}).get(
+                                "workflow_input"
+                            ),
                             "runs": _runs_payload(workflow, runs),
                         },
                     )
@@ -807,9 +830,11 @@ async def _run_turn(
         raise ConversationUnavailableError(_UNAVAILABLE_DETAIL) from error
 
     duration_ms = int((time.perf_counter() - started) * 1000)
+    # Trailing four fields (conversation-compaction): counts and flags only.
     logger.info(
         "turn tenant=%s conversation=%s turn_id=%s outcome=%s workflow=%s"
-        " status=%s duration_ms=%d",
+        " status=%s duration_ms=%d history_tokens=%d ledger=%d summary=%d"
+        " capped=%d",
         tenant_id,
         conversation_id,
         turn_id,
@@ -817,6 +842,10 @@ async def _run_turn(
         workflow or "-",
         runs[-1].status.value if runs else "-",
         duration_ms,
+        view.tokens,
+        view.ledger_lines,
+        int(view.summary_used),
+        int(view.capped),
     )
     # Long-term memory write half (LM A4): schedule the fire-and-forget
     # extraction now that the turn is committed and the turn lock released
@@ -950,13 +979,19 @@ async def on_approval_decided(
             )
             return
         workflow = (linked.data or {}).get("workflow")
+        runs = _runs_payload(workflow, [result])
+        if not runs[0].get("request_id"):
+            # An approved action comes from a fresh run with no request id;
+            # stamp the decided one so the ledger replaces the pending entry
+            # instead of showing the action as pending forever.
+            runs[0]["request_id"] = str(request)
         draft = MessageDraft(
             role=MessageRole.ASSISTANT,
             kind=MessageKind.WORKFLOW_OUTCOME,
             content=_outcome_summary_line(workflow, [result]),
             data={
                 "outcome": TurnOutcome.WORKFLOW.value,
-                "runs": _runs_payload(workflow, [result]),
+                "runs": runs,
             },
         )
         rows = await records._append_messages(

@@ -4,9 +4,9 @@
 injects the envelope keys per turn — ``tenant_id`` (only source of identity,
 same structural rule as the runtime), a fresh ``run_id`` as the turn's
 correlation id, empty ``errors``. Extension keys carry the turn's input
-(``message`` / ``history`` / ``catalog`` / ``must_commit``, service-seeded),
-the route classification, the reply paths' results, and the slice-2 resume
-key (``plan``) — declared now, wired by T9/T10.
+(``message`` / ``history_text`` / ``catalog`` / ``must_commit``,
+service-seeded), the route classification, the reply paths' results, and the
+slice-2 resume key (``plan``) — declared now, wired by T9/T10.
 
 ``RouterDecision`` is the structured-output target of the route node (A5);
 semantic validation (registry membership + input schema) lives in the
@@ -34,7 +34,12 @@ class OrchestratorState(WorkflowState, total=False):
 
     # Turn input — seeded by the conversation service
     message: str
-    history: list[dict[str, Any]]  # prior transcript entries, chronological
+    # Prior conversation as ONE pre-rendered string (ledger + summary +
+    # recent turns, token-bounded), assembled by the conversation service —
+    # the graph only embeds it and never renders history itself. Seeded only
+    # by a fresh turn: the resume path gives no key, and every consuming
+    # prompt must render absence neutrally as "(conversation start)".
+    history_text: str
     catalog: str  # deterministic menu text (catalog.build_catalog())
     must_commit: bool  # clarify cap reached — the T4 conditional edge forces a commit
     # Long-term memory (LM v1): the owner's active fact-card contents in

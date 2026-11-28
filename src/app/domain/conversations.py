@@ -56,6 +56,12 @@ class ConversationRecord(BaseModel):
     # X-User-Id header (LM A2). NULL = anonymous — no fact card, behavior
     # identical to today; pre-existing rows stay NULL forever (no backfill).
     user_id: Optional[str] = None
+    # Conversation compaction v1: the working summary of the older turns
+    # and the last transcript seq it covers (always a turn boundary). NULL
+    # until the first summarization; written only by ``set_summary``, and
+    # only ever forward (monotonic). Never part of the transcript.
+    summary: Optional[str] = None
+    summary_through_seq: Optional[int] = None
     last_seq: int = 0
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
@@ -170,6 +176,28 @@ async def find_message_by_pending_request(
         return None
 
 
+async def set_summary(
+    tenant_id: str, conversation_id: UUID, summary: str, through_seq: int
+) -> bool:
+    """Store the conversation summary covering ``through_seq``; monotonic.
+
+    Returns ``True`` iff a row was written. ``False`` means the header
+    already holds a summary covering as many or more rows (two workers can
+    run concurrently; only the run covering more rows lands — the
+    conversation-compaction ARCH's replacement for a lock), or the
+    infrastructure failed (logged).
+    """
+    try:
+        return await _set_summary(tenant_id, conversation_id, summary, through_seq)
+    except Exception:
+        logger.exception(
+            "set_summary failed for conversation %s (through_seq=%d)",
+            conversation_id,
+            through_seq,
+        )
+        return False
+
+
 @asynccontextmanager
 async def conversation_turn_lock(conversation_id: UUID) -> AsyncIterator[None]:
     """Turn-spanning advisory lock (A17) — the T5 declared additive accessor.
@@ -222,6 +250,25 @@ async def _get_conversation(
         )
         row = await cursor.fetchone()
     return ConversationRecord.model_validate(row) if row else None
+
+
+async def _set_summary(
+    tenant_id: str, conversation_id: UUID, summary: str, through_seq: int
+) -> bool:
+    """One UPDATE, tenant-scoped twice (WHERE clause + row-level security).
+
+    Both columns are replaced together, and only when the stored
+    ``summary_through_seq`` is NULL or lower than ``through_seq``: an equal
+    seq is not a write, so a summary never moves backwards.
+    """
+    async with tenant_connection(tenant_id) as conn:
+        cursor = await conn.execute(
+            "UPDATE conversations SET summary = %s, summary_through_seq = %s "
+            "WHERE id = %s AND tenant_id = %s "
+            "AND (summary_through_seq IS NULL OR summary_through_seq < %s)",
+            (summary, through_seq, conversation_id, tenant_id, through_seq),
+        )
+        return cursor.rowcount > 0
 
 
 async def _append_messages(

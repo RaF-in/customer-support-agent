@@ -40,6 +40,11 @@ _STATIC_APOLOGY_FALLBACK = (
     "your request. Please try again in a moment."
 )
 
+# History is rendered once, by the conversation service (conversation-
+# compaction A2); the composer only embeds it. Absence — the plan-resume
+# path seeds none — reads exactly like a new conversation.
+_HISTORY_START = "(conversation start)"
+
 _COMPOSE_SYSTEM = (
     "You compose conversational customer-support replies from workflow "
     "outcomes. Use the workflow's result to answer or help the customer, "
@@ -89,23 +94,21 @@ async def _generate(
     system: str,
     user: str,
     fallback: str,
-    history: list[dict[str, Any]],
+    history_text: Optional[str],
     memories: Optional[list[str]] = None,
 ) -> str:
     """One generator call with a static fallback (never raises).
-    ``memories`` is the service-seeded fact card (LM v1) — one touch here
-    covers both ``compose_reply`` and ``compose_final``."""
+    ``history_text`` is the service-rendered conversation so far (absent on
+    the resume path — rendered neutrally); ``memories`` is the
+    service-seeded fact card (LM v1) — one touch here covers both
+    ``compose_reply`` and ``compose_final``."""
     model = get_chat_model("generator")
-    history_text = "\n".join(
-        f"[{entry.get('role', '?')}] {entry.get('content', '')}"
-        for entry in history
-    )
     try:
         message = await model.ainvoke(
             [
                 SystemMessage(system),
                 HumanMessage(
-                    f"Conversation so far:\n{history_text}\n\n"
+                    f"Conversation so far:\n{history_text or _HISTORY_START}\n\n"
                     f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
                     f"{user}"
                 ),
@@ -137,7 +140,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
     result = runs[-1]
     classification = state.get("classification") or {}
     workflow = classification.get("workflow")
-    history = state.get("history") or []
+    history_text = state.get("history_text")
     memories = state.get("memories")
 
     if result.status == WorkflowStatus.PENDING_APPROVAL:
@@ -151,7 +154,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
             f"The workflow {workflow!r} failed with this error: "
             f"{result.error or '(no detail)'}. Write the apology.",
             _STATIC_APOLOGY_FALLBACK,
-            history,
+            history_text,
             memories=memories,
         )
         return {"reply": reply}
@@ -165,7 +168,7 @@ async def compose_reply(state: OrchestratorState) -> dict[str, Any]:
         f"Customer's message: {state['message']}\n"
         "Write the reply.",
         _STATIC_COMPOSED_FALLBACK,
-        history,
+        history_text,
         memories=memories,
     )
     return {"reply": reply}
@@ -231,7 +234,7 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
     plan = state.get("plan") or {}
     steps: list[dict[str, Any]] = plan.get("steps") or []
     takeover = bool(plan.get("takeover"))
-    history = state.get("history") or []
+    history_text = state.get("history_text")
     memories = state.get("memories")
     goal = plan.get("message") or state.get("message") or ""
 
@@ -245,7 +248,7 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
             "Write the honest partial report."
         )
         reply = await _generate(
-            _TAKEOVER_SYSTEM, user, _STATIC_TAKEOVER_FALLBACK, history,
+            _TAKEOVER_SYSTEM, user, _STATIC_TAKEOVER_FALLBACK, history_text,
             memories=memories,
         )
     else:
@@ -255,7 +258,7 @@ async def compose_final(state: OrchestratorState) -> dict[str, Any]:
             "Write the single final answer."
         )
         reply = await _generate(
-            _FINAL_SYSTEM, user, _STATIC_FINAL_FALLBACK, history,
+            _FINAL_SYSTEM, user, _STATIC_FINAL_FALLBACK, history_text,
             memories=memories,
         )
 

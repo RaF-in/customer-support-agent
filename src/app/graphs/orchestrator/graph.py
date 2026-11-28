@@ -2,7 +2,7 @@
 
     START ──(turn)──► route ─┬─ direct ──────► direct_reply ──► compose ──► END
       {message,              ├─ clarify ─────► clarify_reply ──► compose ──► END
-       history,              ├─ workflow ────► run_workflow ───► compose ──► END
+       history_text,         ├─ workflow ────► run_workflow ───► compose ──► END
        catalog,              └─ multi_workf. ─► planner ─► validate ─invalid─┐
        must_commit}                                    ▲ (errors fed back)  │
                                                         └───────────────────┘
@@ -92,7 +92,7 @@ async def planner_node(state: OrchestratorState) -> dict[str, Any]:
     plan["attempts"] = plan.get("attempts", 0) + 1
     plan["text"] = await generate_plan_text(
         state["message"],
-        state.get("history") or [],
+        state.get("history_text"),
         state.get("catalog") or build_catalog(),
         feedback=plan.get("errors") or None,
         memories=state.get("memories"),
@@ -121,7 +121,7 @@ async def validate_node(state: OrchestratorState) -> dict[str, Any]:
             )
             reply = await exhaustion_reply(
                 state["message"],
-                state.get("history") or [],
+                state.get("history_text"),
                 memories=state.get("memories"),
             )
             return {

@@ -63,7 +63,6 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `SELF_RAG_TOP_K` | `4` | Chunks fetched per retrieval |
 | `LIVE_DATA_MAX_STEPS` | `8` | Live-data agent ↔ ToolNode round bound |
 | `CONVERSATION_MAX_MESSAGE_CHARS` | `8000` | Max length of one conversational message (422 beyond) |
-| `CONVERSATION_HISTORY_MAX_MESSAGES` | `0` | History cap fed to the router — `0` = unlimited (full transcript) |
 | `CLARIFY_MAX_CONSECUTIVE` | `2` | Consecutive-clarify cap; at the cap the next turn must commit (no more clarify) |
 | `PLANNER_MAX_ATTEMPTS` | `3` | Plan generation+validation attempts before the apologetic direct answer |
 | `EXECUTOR_MAX_REINVOCATIONS` | `3` | Executor re-invocations on open todos before takeover with a partial report |
@@ -71,6 +70,12 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `POSTGRES_POOL_MAX_SIZE` | `10` | Postgres pool size — the concurrent-turns lever (one held connection per active turn) |
 | `MEMORY_ENABLED` | `true` | Long-term-memory master switch — `false` stops card reads and post-turn extraction immediately (the rollback lever) |
 | `MEMORY_MAX_FACTS` | `50` | Fact-card cap fed to prompts, recency order — the memory prompt-budget knob |
+| `COMPACTION_ENABLED` | `true` | Conversation-compaction master switch — `false` renders the pre-feature history and schedules no summarization (the rollback lever) |
+| `COMPACTION_SOFT_TOKENS` | `4000` | Token budget that triggers summarization and caps the verbatim recent turns (must be ≤ `COMPACTION_HARD_TOKENS`) |
+| `COMPACTION_HARD_TOKENS` | `8000` | Token cap on the history fed to prompts; exceeded only by a single oversized turn |
+| `COMPACTION_KEEP_TURNS` | `12` | Recent turns kept word for word before anything is summarized (shrunk by the soft budget) |
+| `COMPACTION_MAX_SUMMARY_CHARS` | `4000` | Stored-summary size target; the summarizer call is bounded from it |
+| `COMPACTION_LEDGER_LINE_MAX_CHARS` | `300` | Per-line bound on result and error text in the exact action ledger |
 | `MCP_SERVERS` | `{}` | MCP tool servers (JSON, langchain-mcp-adapters client format) |
 | `MCP_TENANT_ALLOWLIST` | `{}` | Per-tenant tool allowlist (JSON, tenant → [tools]); deny-by-default |
 | `POSTGRES_DSN` | `postgresql://app_rw:app_rw@localhost:5432/app` | Postgres DSN for the application pool — an ordinary role, subject to the tenant row-level-security policies (see below) |

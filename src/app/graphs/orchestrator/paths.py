@@ -28,20 +28,16 @@ _STATIC_DIRECT_FALLBACK = (
     "Could you rephrase that, or try again in a moment?"
 )
 
+# History is rendered once, by the conversation service (conversation-
+# compaction A2); the node only embeds it. Absence — the plan-resume path
+# seeds none — reads exactly like a new conversation.
+_HISTORY_START = "(conversation start)"
+
 _DIRECT_SYSTEM = (
     "You are a customer-support assistant. Reply to the customer's latest "
     "message concisely and warmly, in the same language as the message, "
     "using the conversation so far for context."
 )
-
-
-def _history_text(history: list[dict[str, Any]]) -> str:
-    if not history:
-        return "(conversation start)"
-    return "\n".join(
-        f"[{entry.get('role', '?')}] {entry.get('content', '')}"
-        for entry in history
-    )
 
 
 async def direct_reply_node(state: OrchestratorState) -> dict[str, Any]:
@@ -53,7 +49,7 @@ async def direct_reply_node(state: OrchestratorState) -> dict[str, Any]:
                 SystemMessage(_DIRECT_SYSTEM),
                 HumanMessage(
                     f"Conversation so far:\n"
-                    f"{_history_text(state.get('history') or [])}\n\n"
+                    f"{state.get('history_text') or _HISTORY_START}\n\n"
                     f"Customer message: {state['message']}"
                 ),
             ]

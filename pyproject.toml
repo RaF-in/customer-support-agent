@@ -20,6 +20,7 @@ dependencies = [
     "langchain-openai>=1.8.0",
     "langchain-mcp-adapters>=0.3.2",
     "psycopg[binary,pool]>=3.2",
+    "tiktoken>=0.14.0",
 ]
 
 [dependency-groups]

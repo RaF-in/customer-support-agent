@@ -5,7 +5,9 @@
 (0.3: answer generation and revision), ``agent`` (0.2: tool-calling),
 ``router`` (0.0: deterministic turn classification), ``planner`` (0.0:
 deterministic plan generation), ``memory`` (0.0: deterministic fact
-distillation — the long-term-memory extraction purpose) —
+distillation — the long-term-memory extraction purpose), ``compactor``
+(0.0: deterministic five-section conversation summaries — the
+conversation-compaction summarization purpose) —
 built by the provider named by ``LLM_PROVIDER`` and named by ``CHAT_MODEL``,
 authenticating with that provider's own key (``_CHAT_API_KEY_ATTRS`` —
 never a single hardcoded env var). Unknown purposes and unknown providers
@@ -31,7 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Purpose -> sampling temperature. The closed vocabulary of purposes graphs
 # may request (A6: graders deterministic, generator more creative, agent
-# balanced; router/planner deterministic — conversation-orchestrator A5/A10).
+# balanced; router/planner deterministic — conversation-orchestrator
+# A5/A10; memory/compactor deterministic).
 CHAT_MODEL_PURPOSES: dict[str, float] = {
     "grader": 0.0,
     "generator": 0.3,
@@ -39,6 +42,7 @@ CHAT_MODEL_PURPOSES: dict[str, float] = {
     "router": 0.0,
     "planner": 0.0,
     "memory": 0.0,
+    "compactor": 0.0,
 }
 
 _CHAT_PROVIDERS: dict[str, type[BaseChatModel]] = {

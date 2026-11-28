@@ -37,6 +37,11 @@ logger = logging.getLogger(__name__)
 # Initial attempt + exactly one retry (A5 — "retry ×1").
 _MAX_ATTEMPTS = 2
 
+# History is rendered once, by the conversation service (conversation-
+# compaction A2); the node only embeds it. Absence — the plan-resume path
+# seeds none — reads exactly like a new conversation.
+_HISTORY_START = "(conversation start)"
+
 _SYSTEM_PROMPT = """\
 You are the router of a customer-support conversational assistant. Classify \
 the user's latest message into exactly one outcome:
@@ -49,17 +54,6 @@ the user's latest message into exactly one outcome:
 {catalog}
 
 Return the structured decision only."""
-
-
-def _history_text(history: list[dict[str, Any]]) -> str:
-    """Render the transcript slice the router sees (chronological)."""
-    if not history:
-        return "(conversation start)"
-    lines = [
-        f"[{entry.get('role', '?')}] {entry.get('content', '')}"
-        for entry in history
-    ]
-    return "\n".join(lines)
 
 
 # The long-term-memory block (LM v1): the owner's fact card, service-seeded.
@@ -123,7 +117,7 @@ async def _ask(messages: list[Any]) -> RouterDecision:
 
 async def classify(
     message: str,
-    history: list[dict[str, Any]],
+    history_text: Optional[str],
     catalog: str,
     memories: Optional[list[str]] = None,
 ) -> tuple[RouterDecision, int]:
@@ -131,14 +125,16 @@ async def classify(
 
     ``attempts`` never exceeds 2 (one retry). The returned decision is
     always in contract: either a validated classification or the direct
-    fallback. Never raises. ``memories`` is the service-seeded fact card
-    (LM v1): durable knowledge about the customer that crosses
-    conversations, rendered as its own labeled block.
+    fallback. Never raises. ``history_text`` is the service-rendered
+    conversation so far (absent on the resume path — rendered neutrally);
+    ``memories`` is the service-seeded fact card (LM v1): durable knowledge
+    about the customer that crosses conversations, rendered as its own
+    labeled block.
     """
     base_messages = [
         SystemMessage(_SYSTEM_PROMPT.format(catalog=catalog)),
         HumanMessage(
-            f"Conversation so far:\n{_history_text(history)}\n\n"
+            f"Conversation so far:\n{history_text or _HISTORY_START}\n\n"
             f"{_MEMORY_BLOCK_HEADER}\n{_memory_text(memories)}\n\n"
             f"User message: {message}"
         ),
@@ -171,7 +167,7 @@ async def route(state: OrchestratorState) -> dict[str, Any]:
     catalog = state.get("catalog") or build_catalog()
     decision, attempts = await classify(
         state["message"],
-        state.get("history") or [],
+        state.get("history_text"),
         catalog,
         memories=state.get("memories"),
     )
