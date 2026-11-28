@@ -73,10 +73,41 @@ environment variables or `.env` (see `.env.example` for every variable).
 | `MEMORY_MAX_FACTS` | `50` | Fact-card cap fed to prompts, recency order — the memory prompt-budget knob |
 | `MCP_SERVERS` | `{}` | MCP tool servers (JSON, langchain-mcp-adapters client format) |
 | `MCP_TENANT_ALLOWLIST` | `{}` | Per-tenant tool allowlist (JSON, tenant → [tools]); deny-by-default |
-| `POSTGRES_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN — transcripts, plan records, approval requests, action-result audit; the compose service starts by default |
+| `POSTGRES_DSN` | `postgresql://app_rw:app_rw@localhost:5432/app` | Postgres DSN for the application pool — an ordinary role, subject to the tenant row-level-security policies (see below) |
+| `POSTGRES_ADMIN_DSN` | `postgresql://app:app@localhost:5432/app` | Postgres DSN of the table owner — used only by the boot-time schema bootstrap |
+| `POSTGRES_APP_ROLE` | `app_rw` | Name of the ordinary role the bootstrap grants row rights to (must match `APP_RW_USER` in docker-compose.yml) |
 
 **Port conflict on 6333?** Set `QDRANT_PORT` in `.env` (host port) and point
 `QDRANT_URL` at the new port — never edit `docker-compose.yml` directly.
+
+### Two Postgres roles (tenant isolation)
+
+Tenant isolation in Postgres is enforced twice. Every accessor writes
+`tenant_id` into its WHERE clause, and each tenant table also carries a
+row-level-security policy (`tenant_isolation`) that makes Postgres drop any
+row from another tenant — so a query that forgets the WHERE clause reads and
+writes nothing outside its tenant. Superusers ignore those policies, which is
+why there are two roles:
+
+| Role | Created by | Used by |
+|------|-----------|---------|
+| `app` — superuser, owns the tables | `POSTGRES_USER` in `docker-compose.yml` | the boot-time schema bootstrap (`POSTGRES_ADMIN_DSN`) |
+| `app_rw` — ordinary role | `docker/postgres/01-app-role.sh` | the application pool (`POSTGRES_DSN`) |
+
+The app refuses to serve from Postgres with a `POSTGRES_DSN` role that could
+bypass the policies (superuser, `BYPASSRLS`, or table owner), and logs one
+warning naming the reason; documents and search are unaffected.
+
+**The init script runs once**, when the `postgres_data` volume is first
+created. To add the role to an existing database, run the script's
+`CREATE ROLE` statement by hand, or reset the volume (this wipes every
+conversation, memory, plan and approval; Qdrant documents are untouched):
+
+```bash
+docker compose down
+docker volume rm customer-support-agent_postgres_data
+docker compose up -d
+```
 
 ## Project layout
 

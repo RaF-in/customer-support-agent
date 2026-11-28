@@ -9,7 +9,11 @@ one sort, one read path).
 Structural tenant isolation lives in the WHERE clauses by construction:
 every statement carries ``tenant_id``, so a cross-tenant id returns no row —
 reading exactly like an unknown one (no tenant-existence oracle,
-CR-R12/N3). Accessor style mirrors the OVM's public-swallow /
+CR-R12/N3). Postgres enforces the same filter a second time through the
+``tenant_isolation`` row-level-security policy
+(``infrastructure/postgres.py``): every accessor takes its connection via
+``tenant_connection``, so a statement without the WHERE clause still cannot
+cross tenants. Accessor style mirrors the OVM's public-swallow /
 private-raise twins, expressed in SQL over the process-wide psycopg pool:
 public functions catch and log infrastructure failures and return ``None``
 (a fetch finding nothing and a fetch that broke are indistinguishable here;
@@ -29,7 +33,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.domain.enums import MessageKind, MessageRole
-from app.infrastructure.postgres import advisory_lock, get_postgres_pool
+from app.infrastructure.postgres import advisory_lock, tenant_connection
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +201,7 @@ _MESSAGE_COLUMNS = (
 async def _create_conversation(
     tenant_id: str, user_id: Optional[str] = None
 ) -> ConversationRecord:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "INSERT INTO conversations (tenant_id, user_id) "
             "VALUES (%s, %s) RETURNING *",
@@ -211,7 +215,7 @@ async def _create_conversation(
 async def _get_conversation(
     tenant_id: str, conversation_id: UUID
 ) -> Optional[ConversationRecord]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT * FROM conversations WHERE id = %s AND tenant_id = %s",
             (conversation_id, tenant_id),
@@ -225,8 +229,7 @@ async def _append_messages(
     conversation_id: UUID,
     drafts: list[MessageDraft],
 ) -> list[ConversationMessageRecord]:
-    pool = get_postgres_pool()
-    async with pool.connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         async with conn.transaction():
             cursor = await conn.execute(
                 "UPDATE conversations SET last_seq = last_seq + %s, "
@@ -284,7 +287,7 @@ async def _insert_message_rows(
 async def _get_transcript(
     tenant_id: str, conversation_id: UUID
 ) -> list[ConversationMessageRecord]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT " + _MESSAGE_COLUMNS + " FROM conversation_messages "
             "WHERE tenant_id = %s AND conversation_id = %s ORDER BY seq",
@@ -297,7 +300,7 @@ async def _get_transcript(
 async def _find_message_by_pending_request(
     tenant_id: str, pending_request_id: UUID
 ) -> Optional[ConversationMessageRecord]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT " + _MESSAGE_COLUMNS + " FROM conversation_messages "
             "WHERE tenant_id = %s AND pending_request_id = %s "

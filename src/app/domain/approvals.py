@@ -18,7 +18,11 @@ success.
 
 Tenant isolation is structural: every WHERE clause carries ``tenant_id``;
 an unknown id and another tenant's read identically as absent (no
-tenant-existence oracle, R3).
+tenant-existence oracle, R3). Postgres enforces the same filter a second
+time through the ``tenant_isolation`` row-level-security policy
+(``infrastructure/postgres.py``): every accessor takes its connection via
+``tenant_connection``, so a statement without the WHERE clause still cannot
+cross tenants.
 """
 
 import logging
@@ -30,7 +34,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.domain.enums import ApprovalStatus
-from app.infrastructure.postgres import get_postgres_pool
+from app.infrastructure.postgres import tenant_connection
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +98,7 @@ def _to_record(row: dict[str, Any]) -> ApprovalRecord:
 async def create_approval(record: ApprovalRecord) -> ApprovalRecord:
     """Insert one pending request row; returns the stored row (DB ``now()``
     as ``created_at``). Raises on infrastructure failure."""
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(record.tenant_id) as conn:
         cursor = await conn.execute(
             "INSERT INTO approval_requests "
             "(id, tenant_id, action_name, action_input, reason, risk_level,"
@@ -121,7 +125,7 @@ async def get_approval(
 ) -> Optional[ApprovalRecord]:
     """Fetch one request (unknown and cross-tenant ids both read as
     absent — no oracle, R3). Raises on infrastructure failure."""
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT * FROM approval_requests "
             "WHERE id = %s AND tenant_id = %s",
@@ -147,7 +151,7 @@ async def mark_decided(
     keeps its original ``created_at``; only the audit fields change.
     Raises on infrastructure failure.
     """
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "UPDATE approval_requests "
             "SET status = %s, decided_by = %s, decision_note = %s, "
@@ -173,7 +177,7 @@ async def list_approvals(
         query += " AND status = %s"
         params = (tenant_id, status.value)
     query += " ORDER BY created_at DESC, id DESC"
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(query, params)
         rows = await cursor.fetchall()
     return [_to_record(row) for row in rows]

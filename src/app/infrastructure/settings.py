@@ -74,4 +74,12 @@ class Settings(BaseSettings):
     # Postgres — the row-state substrate: conversation transcripts, plan
     # working records, and (since the checkpointer was deleted) approval
     # request rows and action-result audit. A default compose dependency.
-    POSTGRES_DSN: str = "postgresql://app:app@localhost:5432/app"
+    #
+    # Two roles, because tenant isolation is a row-level-security policy and
+    # admins ignore those: POSTGRES_DSN is the pool's everyday role (subject
+    # to the policies), POSTGRES_ADMIN_DSN the owner that creates the schema
+    # at boot. open_postgres refuses a POSTGRES_DSN role that could bypass
+    # the policies. All three must match docker-compose.yml.
+    POSTGRES_DSN: str = "postgresql://app_rw:app_rw@localhost:5432/app"
+    POSTGRES_ADMIN_DSN: str = "postgresql://app:app@localhost:5432/app"
+    POSTGRES_APP_ROLE: str = Field(default="app_rw", min_length=1)

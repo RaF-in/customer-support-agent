@@ -15,6 +15,10 @@ abandonment carries a reason).
 Same disciplines as ``domain/conversations.py``: structural tenant
 isolation in every WHERE clause (cross-tenant reads as unknown, PE-N2),
 public-swallow / private-raise accessor twins, process-wide psycopg pool.
+The WHERE clauses are backed by the ``tenant_isolation`` row-level-security
+policy (``infrastructure/postgres.py``): every accessor takes its connection
+via ``tenant_connection``, so a statement without the WHERE clause still
+cannot cross tenants.
 """
 
 import logging
@@ -26,7 +30,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.domain.enums import PlanStatus, TodoStatus
-from app.infrastructure.postgres import get_postgres_pool
+from app.infrastructure.postgres import tenant_connection
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +144,7 @@ async def update_plan(plan: PlanRecord) -> Optional[PlanRecord]:
 async def _create_plan(
     tenant_id: str, conversation_id: UUID, steps: list[PlanStep]
 ) -> PlanRecord:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "INSERT INTO conversation_plans "
             "(tenant_id, conversation_id, status, steps, todos) "
@@ -158,7 +162,7 @@ async def _create_plan(
 
 
 async def _get_plan(tenant_id: str, plan_id: UUID) -> Optional[PlanRecord]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT * FROM conversation_plans WHERE id = %s AND tenant_id = %s",
             (plan_id, tenant_id),
@@ -170,7 +174,7 @@ async def _get_plan(tenant_id: str, plan_id: UUID) -> Optional[PlanRecord]:
 async def _get_plan_by_pending_request(
     tenant_id: str, pending_request_id: UUID
 ) -> Optional[PlanRecord]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT * FROM conversation_plans "
             "WHERE tenant_id = %s AND pending_request_id = %s "
@@ -182,7 +186,7 @@ async def _get_plan_by_pending_request(
 
 
 async def _update_plan(plan: PlanRecord) -> PlanRecord:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(plan.tenant_id) as conn:
         cursor = await conn.execute(
             "UPDATE conversation_plans SET status = %s, steps = %s, "
             "todos = %s, pending_request_id = %s, updated_at = now() "

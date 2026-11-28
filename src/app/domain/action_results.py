@@ -5,6 +5,11 @@ discipline: the caller — the action graph's ``record_result`` node — maps a
 raise to a failed run, because a run whose durable outcome could not be
 recorded must not report success). Formerly a Qdrant payload-only point
 with a dummy 1-dim vector; moved to Postgres with the approvals queue.
+
+Tenant isolation is the ``tenant_isolation`` row-level-security policy
+(``infrastructure/postgres.py``): the connection comes from
+``tenant_connection`` with the record's tenant, so Postgres itself rejects
+a row written under another tenant.
 """
 
 import logging
@@ -16,7 +21,7 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
 from app.domain.enums import ActionStatus
-from app.infrastructure.postgres import get_postgres_pool
+from app.infrastructure.postgres import tenant_connection
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +50,7 @@ class ActionResultRecord(BaseModel):
 async def record_action_result(record: ActionResultRecord) -> ActionResultRecord:
     """Append one immutable audit row; returns the stored row (DB ``now()``
     as ``created_at``). Raises on infrastructure failure."""
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(record.tenant_id) as conn:
         cursor = await conn.execute(
             "INSERT INTO action_results "
             "(id, tenant_id, action_name, approval_id, status, result, error) "

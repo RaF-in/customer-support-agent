@@ -20,6 +20,11 @@ private-raise accessor twins over the process-wide psycopg pool (the
 application service is the single catch point), and no FK on ``user_id``
 — MVP identity is caller-supplied strings, so the join to
 ``conversations.user_id`` is by value convention only.
+
+The WHERE clauses are backed by the ``tenant_isolation`` row-level-security
+policy (``infrastructure/postgres.py``): every accessor takes its connection
+via ``tenant_connection``, so a statement without the WHERE clause still
+cannot cross tenants.
 """
 
 import logging
@@ -29,7 +34,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from app.infrastructure.postgres import get_postgres_pool
+from app.infrastructure.postgres import tenant_connection
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +143,7 @@ async def _add_fact(
     content: str,
     source_conversation_id: Optional[UUID],
 ) -> MemoryFact:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "INSERT INTO memory_facts "
             "(tenant_id, user_id, content, source_conversation_id) "
@@ -153,7 +158,7 @@ async def _add_fact(
 async def _list_active_facts(
     tenant_id: str, user_id: str, limit: int
 ) -> list[MemoryFact]:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "SELECT * FROM memory_facts "
             "WHERE tenant_id = %s AND user_id = %s AND status = 'active' "
@@ -171,7 +176,7 @@ async def _supersede_fact(
     # race (or a second supersede) matches zero rows and reads as the no-op
     # None at the statement itself — belt-and-braces before the lock that
     # makes extraction races structurally impossible (A4/LM-N4).
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "UPDATE memory_facts SET status = 'superseded', superseded_by = %s, "
             "updated_at = now() "
@@ -183,7 +188,7 @@ async def _supersede_fact(
 
 
 async def _forget_user(tenant_id: str, user_id: str) -> bool:
-    async with get_postgres_pool().connection() as conn:
+    async with tenant_connection(tenant_id) as conn:
         cursor = await conn.execute(
             "DELETE FROM memory_facts WHERE tenant_id = %s AND user_id = %s",
             (tenant_id, user_id),
